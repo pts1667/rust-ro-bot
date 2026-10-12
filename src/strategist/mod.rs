@@ -1,0 +1,523 @@
+//! The strategist: picks the goal GOAP works on. It runs beside the agent and never blocks it.
+//!
+//! With the LLM, each step follows SKILL.state: a fresh smolgent session gets the specification P, the
+//! strategic state Σ and an observation digest O, may look facts up with two tools, and must `commit` an option
+//! and a patch ΔΣ. The session (lookups and any reasoning) is then dropped; only the validated Σ survives.
+//! Without the LLM, or when it fails, a deterministic fallback picks from the same options.
+
+pub mod eval;
+mod examples;
+pub mod helper;
+pub mod history;
+pub mod llm;
+pub mod options;
+pub mod prompt;
+pub mod skill_state;
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
+use smolgent::{ChatMessage, ChatSession, Tool, ToolDefinition, ToolRegistry};
+use tokio::sync::{mpsc, watch};
+
+use crate::api::Observation;
+use crate::goap::{Goal, WorldState};
+use crate::knowledge::Knowledge;
+use crate::memory::Counters;
+use llm::{LLM_TIMEOUT, Llm};
+use options::{Opt, build_options, fallback};
+use skill_state::StrategicState;
+
+/// Lookup rounds before the model must commit.
+const LOOKUP_ROUNDS: usize = 8;
+/// Lookups run per round; extra calls are answered with a refusal.
+const LOOKUPS_PER_ROUND: usize = 8;
+/// Quests returned per `quest_info` search: a job change has one quest per guild NPC.
+const QUEST_HITS: u32 = 4;
+
+/// What the agent tells the strategist about the game, refreshed after every step.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub obs: Observation,
+    pub ws: WorldState,
+    pub goal: Option<Goal>,
+    pub goal_secs: u64,
+    pub last_outcome: String,
+    pub weight_frac: f32,
+    /// HP the healing items in the inventory would give back.
+    pub heal_hp: u32,
+    /// Number of healing items in the inventory.
+    pub heal_items: u32,
+    pub loot_items: u32,
+    pub potion_price: u64,
+    pub kills: u64,
+    pub deaths: u64,
+    pub kills_by_mob: Vec<(String, u64)>,
+    pub deaths_by_cause: Vec<(String, u64)>,
+    pub journal: Vec<String>,
+    pub visited: HashSet<String>,
+    /// Goals that failed recently, not to be offered again for a while.
+    pub recent_failures: Vec<Goal>,
+}
+
+/// Why the strategist should think now. The texts are only read through `Debug`, in the trigger log.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum Event {
+    LevelUp,
+    JobLevelUp,
+    Died,
+    MapChanged,
+    GoalDone(String),
+    GoalFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Directive {
+    pub seq: u64,
+    pub goal: Goal,
+    pub reason: String,
+    pub state: StrategicState,
+    pub by_llm: bool,
+    pub counters: Counters,
+}
+
+pub struct Handle {
+    pub directives: watch::Receiver<Option<Directive>>,
+    pub events: mpsc::UnboundedSender<Event>,
+    pub snapshots: watch::Sender<Option<Snapshot>>,
+}
+
+/// The outcome of one LLM step.
+#[derive(Debug)]
+pub struct LlmDecision {
+    pub option: Opt,
+    pub reason: String,
+    pub patch: Value,
+    pub lookups: Vec<String>,
+    pub prompt_chars: usize,
+    pub millis: u128,
+}
+
+/// `goal_changes` gets the sequence number of every directive whose goal differs from the previous one, so
+/// long behaviours can stop early.
+pub fn spawn(knowledge: Knowledge, llm: Option<Llm>, mut state: StrategicState, period: Duration, goal_changes: Arc<AtomicU64>) -> Handle {
+    examples::scrub_state(&mut state);
+    let (dir_tx, dir_rx) = watch::channel(None);
+    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+    let (snap_tx, snap_rx) = watch::channel(None);
+    tokio::spawn(run(knowledge, llm, state, period, dir_tx, ev_rx, snap_rx, goal_changes));
+    Handle { directives: dir_rx, events: ev_tx, snapshots: snap_tx }
+}
+
+async fn run(
+    knowledge: Knowledge,
+    llm: Option<Llm>,
+    mut state: StrategicState,
+    period: Duration,
+    directives: watch::Sender<Option<Directive>>,
+    mut events: mpsc::UnboundedReceiver<Event>,
+    mut snapshots: watch::Receiver<Option<Snapshot>>,
+    goal_changes: Arc<AtomicU64>,
+) {
+    let mut seq = 0;
+    let mut last_goal: Option<Goal> = None;
+    let mut counters = Counters::default();
+    // The conversation of the history mode, kept for the whole run.
+    let mut history: Option<history::History> = None;
+    // Wait for the first snapshot.
+    while snapshots.borrow().is_none() {
+        if snapshots.changed().await.is_err() {
+            return;
+        }
+    }
+    let mut why = "start".to_string();
+    loop {
+        let snap = snapshots.borrow().clone();
+        let Some(snap) = snap else { return };
+        match decide(&knowledge, llm.as_ref(), &mut state, &snap, &mut counters, &mut history).await {
+            Ok((goal, reason, by_llm)) => {
+                seq += 1;
+                tracing::info!(target: "strategist", seq, trigger = %why, goal = %goal.label(), by_llm, %reason, "directive");
+                if last_goal.as_ref() != Some(&goal) {
+                    goal_changes.store(seq, Ordering::SeqCst);
+                    last_goal = Some(goal.clone());
+                }
+                let d = Directive { seq, goal, reason, state: state.clone(), by_llm, counters: counters.clone() };
+                if directives.send(Some(d)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => tracing::warn!(target: "strategist", %error, "no decision"),
+        }
+        // Next trigger: an event, or the period.
+        tokio::select! {
+            ev = events.recv() => match ev {
+                Some(ev) => why = format!("{ev:?}"),
+                None => return,
+            },
+            _ = tokio::time::sleep(period) => why = "periodic".into(),
+        }
+        // Let the agent publish the snapshot that goes with the event, and fold bursts of events into one step.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        while let Ok(ev) = events.try_recv() {
+            why = format!("{why}+{ev:?}");
+        }
+    }
+}
+
+/// One decision: the LLM when there is one, the fallback otherwise or when the LLM fails.
+async fn decide(
+    knowledge: &Knowledge,
+    llm: Option<&Llm>,
+    state: &mut StrategicState,
+    snap: &Snapshot,
+    counters: &mut Counters,
+    history: &mut Option<history::History>,
+) -> Result<(Goal, String, bool)> {
+    state.on_job(&snap.obs.me.job);
+    let options = build_options(snap, knowledge, state).await?;
+    if options.len() == 1 {
+        return Ok((options[0].goal.clone(), "only option".into(), false));
+    }
+    // A share of the steps goes to the fallback, to compare the two and to save LLM time.
+    if let Some(llm) = llm.filter(|l| rand::random::<f32>() < l.share) {
+        counters.llm_calls += 1;
+        let step = match llm.context {
+            llm::ContextMode::SkillState => llm_step(llm, knowledge, state, snap, &options).await,
+            llm::ContextMode::History => {
+                let h = history.get_or_insert_with(|| history::History::new(llm));
+                let step = h.step(llm, knowledge, state, snap, &options).await;
+                for line in h.drain() {
+                    tracing::info!(target: "strategist", "history: {line}");
+                }
+                tracing::info!(target: "strategist", context_tokens = h.estimated_tokens(), "history");
+                step
+            }
+        };
+        match step {
+            Ok(d) => {
+                counters.llm_prompt_chars += d.prompt_chars as u64;
+                let report = state.apply_patch(&examples::scrub_patch(d.patch.clone()));
+                if !report.rejected.is_empty() {
+                    counters.llm_invalid += 1;
+                }
+                tracing::info!(
+                    target: "strategist",
+                    option = %d.option.id,
+                    ms = d.millis,
+                    prompt_chars = d.prompt_chars,
+                    lookups = ?d.lookups,
+                    patch = %d.patch,
+                    applied = ?report.applied,
+                    rejected = ?report.rejected,
+                    "LLM step"
+                );
+                return Ok((d.option.goal, d.reason, true));
+            }
+            Err(error) => {
+                counters.llm_invalid += 1;
+                tracing::warn!(target: "strategist", %error, "LLM step failed, using the fallback");
+            }
+        }
+    }
+    let o = fallback(snap, &options, state).ok_or_else(|| anyhow!("no option"))?;
+    Ok((o.goal, format!("fallback: {}", o.line), false))
+}
+
+fn commit_definition(options: &[Opt]) -> ToolDefinition {
+    commit_tool(Some(options))
+}
+
+/// The commit tool; with `None`, the option is any string (checked by the tool), so the definition is the same every
+/// turn. History mode needs that: the tools are part of the prompt, and a definition that changes every turn makes
+/// llama.cpp read the whole conversation again (2 s a turn at 3k tokens, 12 s at 57k).
+fn commit_tool(options: Option<&[Opt]>) -> ToolDefinition {
+    let option = match options {
+        Some(options) => json!({"type": "string", "enum": options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>()}),
+        None => json!({"type": "string", "description": "One option id from OPTIONS"}),
+    };
+    ToolDefinition::new(
+        "commit",
+        "Commit the next goal: first your analysis of the options, then one option id, then the changes to your STATE.",
+        // Keys are generated in alphabetical order, so `analysis` comes before `option`: the model compares the
+        // options before it names one, instead of justifying the first option it named.
+        json!({
+            "type": "object",
+            "properties": {
+                "analysis": {"type": "string", "maxLength": 300, "description": "Compare the options against the guidelines in one or two sentences"},
+                "option": option,
+                "state_patch": StrategicState::patch_schema()
+            },
+            "required": ["analysis", "option", "state_patch"]
+        }),
+    )
+}
+
+/// `monster_info` and `map_info`, answering in a few short lines.
+fn lookup_tools(knowledge: &Knowledge, snap: &Snapshot) -> ToolRegistry {
+    let k = knowledge.clone();
+    let obs = snap.obs.clone();
+    let monster = Tool::new(
+        ToolDefinition::new(
+            "monster_info",
+            "Facts about a monster: level, HP, experience, aggressiveness, and how a fight would go for you.",
+            json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
+        ),
+        move |args: Value| {
+            let k = k.clone();
+            let obs = obs.clone();
+            Box::pin(async move {
+                let name = args["name"].as_str().unwrap_or_default().to_owned();
+                let text = monster_info(&k, &obs, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                Ok(Value::String(text))
+            })
+        },
+    );
+    let k = knowledge.clone();
+    let map = Tool::new(
+        ToolDefinition::new(
+            "map_info",
+            "Facts about a map: whether it is a town, its monsters, and the maps its warps lead to.",
+            json!({"type": "object", "properties": {"map": {"type": "string"}}, "required": ["map"]}),
+        ),
+        move |args: Value| {
+            let k = k.clone();
+            Box::pin(async move {
+                let name = args["map"].as_str().unwrap_or_default().to_owned();
+                let text = map_info(&k, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                Ok(Value::String(text))
+            })
+        },
+    );
+    let k = knowledge.clone();
+    let wiki = Tool::new(
+        ToolDefinition::new(
+            "wiki_page",
+            "An iRO Wiki Classic page, e.g. \"Swordman\", \"Novice\", \"Stats\", \"Prontera\".",
+            json!({"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}),
+        ),
+        move |args: Value| {
+            let k = k.clone();
+            Box::pin(async move {
+                let title = args["title"].as_str().unwrap_or_default().trim().replace(' ', "_");
+                let text = match k.db.wiki(&format!("{title}.md")).await {
+                    Ok(page) => wiki_digest(&page),
+                    Err(e) => format!("no page: {e}"),
+                };
+                Ok(Value::String(text))
+            })
+        },
+    );
+    let k = knowledge.clone();
+    let quest = Tool::new(
+        ToolDefinition::new(
+            "quest_info",
+            "Quests matching a name, with a step-by-step guide, e.g. \"Job Change to Swordman\".",
+            json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
+        ),
+        move |args: Value| {
+            let k = k.clone();
+            Box::pin(async move {
+                let name = args["name"].as_str().unwrap_or_default().to_owned();
+                let text = quest_info(&k, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                Ok(Value::String(text))
+            })
+        },
+    );
+    ToolRegistry::new().with_tool(monster).with_tool(map).with_tool(wiki).with_tool(quest)
+}
+
+/// The prose of a wiki page without links, images and tables, for a small context.
+fn wiki_digest(page: &str) -> String {
+    let mut out = String::new();
+    for line in page.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('|') || line.starts_with("![") || line.starts_with("---") {
+            continue;
+        }
+        let mut text = String::new();
+        let mut chars = line.chars().peekable();
+        // Keep the text of [text](link), drop the link.
+        while let Some(c) = chars.next() {
+            match c {
+                '[' => {}
+                ']' if chars.peek() == Some(&'(') => {
+                    for c in chars.by_ref() {
+                        if c == ')' {
+                            break;
+                        }
+                    }
+                }
+                _ => text.push(c),
+            }
+        }
+        out.push_str(text.trim_start_matches('#').trim());
+        out.push(' ');
+    }
+    out
+}
+
+/// The guide part of the quests matching a name: who to talk to, where, and what they ask for.
+async fn quest_info(k: &Knowledge, name: &str) -> Result<String> {
+    let hits = k.db.search("quests", name, QUEST_HITS).await?;
+    if hits.is_empty() {
+        bail!("no quest matches {name:?}");
+    }
+    let mut out = Vec::new();
+    for hit in hits {
+        let Some(id) = hit.id_u32() else { continue };
+        let q = k.db.get(&format!("/db/quests/{id}")).await?;
+        // `notes` is the same explanation of the data on every quest.
+        let keep = ["title", "description", "guide", "prerequisites", "recommended_level", "sources", "objectives"];
+        let fields: serde_json::Map<String, Value> =
+            keep.iter().filter_map(|key| q.get(*key).filter(|v| !v.is_null()).map(|v| ((*key).to_owned(), v.clone()))).collect();
+        out.push(Value::Object(fields));
+    }
+    Ok(serde_json::to_string(&out)?)
+}
+
+async fn monster_info(k: &Knowledge, obs: &Observation, name: &str) -> Result<String> {
+    let hits = k.db.search("mobs", name, 1).await?;
+    let id = hits.first().and_then(|l| l.id_u32()).ok_or_else(|| anyhow!("unknown monster {name}"))?;
+    let m = k.db.mob(id).await?;
+    let a = k.fighter(obs).await?.assess(&m);
+    let drops: Vec<String> = m.drops.iter().filter(|d| !d.item.name.is_empty()).take(4).map(|d| d.item.name.clone()).collect();
+    Ok(format!(
+        "{}: level {}, HP {}, base exp {}, job exp {}, {}{}. A fight would take about {:.0} s and cost about {:.0}% of your HP. Drops: {}.",
+        m.name_english,
+        m.level,
+        m.hp,
+        m.exp,
+        m.job_exp,
+        if m.aggressive() { "attacks on sight" } else { "passive" },
+        if m.boss() { ", BOSS" } else { "" },
+        a.kill_secs,
+        a.danger * 100.0,
+        drops.join(", ")
+    ))
+}
+
+async fn map_info(k: &Knowledge, name: &str) -> Result<String> {
+    let m = k.db.map(name).await?;
+    let mut mobs = Vec::new();
+    for s in m.mob_spawns.iter().take(8) {
+        mobs.push(format!("{} x{}", s.mob.name, s.amount));
+    }
+    let links: Vec<String> = m.connected_maps.iter().take(8).map(|l| l.id_str()).collect();
+    Ok(format!(
+        "{}: {}. Monsters: {}. Warps to: {}.",
+        m.name,
+        if m.is_town() { "town" } else { "not a town" },
+        if mobs.is_empty() { "none".into() } else { mobs.join(", ") },
+        links.join(", ")
+    ))
+}
+
+/// One SKILL.state step with the LLM.
+pub async fn llm_step(llm: &Llm, knowledge: &Knowledge, state: &StrategicState, snap: &Snapshot, options: &[Opt]) -> Result<LlmDecision> {
+    let options = shuffled(llm, options);
+    let user = prompt::user_message(llm.order, state, snap, &options);
+    llm_turn(llm, knowledge, snap, &options, user).await
+}
+
+/// The options in random order when the LLM shuffles them: the model favours the first one it reads.
+pub fn shuffled(llm: &Llm, options: &[Opt]) -> Vec<Opt> {
+    use rand::seq::SliceRandom;
+    let mut options = options.to_vec();
+    if llm.shuffle {
+        options.shuffle(&mut rand::rng());
+    }
+    options
+}
+
+/// One step on a ready user message. `snap` only serves the lookups (the fight estimates of `monster_info`).
+pub async fn llm_turn(llm: &Llm, knowledge: &Knowledge, snap: &Snapshot, options: &[Opt], user: String) -> Result<LlmDecision> {
+    let start = Instant::now();
+    let system = if llm.examples { format!("{}{}", prompt::SYSTEM, examples::text()) } else { prompt::SYSTEM.to_owned() };
+    let prompt_chars = system.len() + user.len();
+    let lookups = lookup_tools(knowledge, snap);
+    let commit_only = ToolRegistry::new().with_tool(Tool::new(commit_definition(options), |_| Box::pin(async { Ok(Value::Null) })));
+    let mut all = lookup_tools(knowledge, snap);
+    all.insert(Tool::new(commit_definition(options), |_| Box::pin(async { Ok(Value::Null) })));
+
+    let mut session = ChatSession::with_system_prompt(system);
+    session.push_user(user);
+    let mut done_lookups = Vec::new();
+    for round in 0..=LOOKUP_ROUNDS {
+        let last = round == LOOKUP_ROUNDS;
+        let (provider, registry) = if last { (&llm.forced, &commit_only) } else { (&llm.free, &all) };
+        let response = tokio::time::timeout(LLM_TIMEOUT, session.complete_with_tools(provider, registry))
+            .await
+            .map_err(|_| anyhow!("LLM timed out"))?
+            .map_err(|e| anyhow!("LLM request failed: {e}"))?;
+        let calls = &response.message.tool_calls;
+        if let Some(commit) = calls.iter().find(|c| c.function.name == "commit") {
+            let args: Value = llm::parse_json_loose(&commit.function.arguments).ok_or_else(|| anyhow!("commit arguments are not JSON"))?;
+            let id = args["option"].as_str().unwrap_or_default();
+            // Without grammar the model sometimes names an option that is not offered: say so and let it retry.
+            if !last && !options.iter().any(|o| o.id == id) {
+                let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
+                let error = format!("error: {id:?} is not an option; choose one of {}", ids.join(", "));
+                session.push(ChatMessage::tool_result(&commit.id, "commit", error));
+                continue;
+            }
+            return finish(args, options, done_lookups, prompt_chars, start);
+        }
+        if calls.is_empty() {
+            // Plain text: accept a JSON answer with the same fields, else ask again with the commit tool forced.
+            if let Some(args) = llm::parse_json_loose(&response.message.content.text())
+                && args.get("option").is_some()
+            {
+                return finish(args, options, done_lookups, prompt_chars, start);
+            }
+            continue;
+        }
+        // The model tends to fire many lookups at once; run the first few, answer the rest with a refusal
+        // (every call needs a result message).
+        for (i, c) in calls.iter().enumerate() {
+            if i < LOOKUPS_PER_ROUND {
+                done_lookups.push(format!("{}({})", c.function.name, c.function.arguments));
+                let result = lookups.execute_call_reporting_errors(c).await;
+                session.push(result.into_message());
+            } else {
+                session.push(ChatMessage::tool_result(&c.id, &c.function.name, &format!("skipped: at most {LOOKUPS_PER_ROUND} lookups per turn")));
+            }
+        }
+    }
+    bail!("the model did not commit")
+}
+
+fn finish(args: Value, options: &[Opt], lookups: Vec<String>, prompt_chars: usize, start: Instant) -> Result<LlmDecision> {
+    let id = args["option"].as_str().unwrap_or_default();
+    let option = options.iter().find(|o| o.id == id).cloned().ok_or_else(|| anyhow!("unknown option {id:?}"))?;
+    Ok(LlmDecision {
+        option,
+        reason: args["analysis"].as_str().or(args["reason"].as_str()).unwrap_or_default().chars().take(300).collect(),
+        patch: args.get("state_patch").cloned().unwrap_or(Value::Null),
+        lookups,
+        prompt_chars,
+        millis: start.elapsed().as_millis(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wiki_digest_keeps_prose_only() {
+        let page = "# Swordman\n\n![img](a.png)\n| a | b |\nThe [Swordman](Swordman.md) is a melee class.\n";
+        assert_eq!(wiki_digest(page).trim(), "Swordman The Swordman is a melee class.");
+    }
+
+    #[test]
+    fn commit_schema_enumerates_options() {
+        let options = vec![options::Opt { id: "rest".into(), goal: Goal::Rest, line: String::new(), score: 0.0 }];
+        let def = commit_definition(&options);
+        assert_eq!(def.function.parameters["properties"]["option"]["enum"], json!(["rest"]));
+    }
+}
