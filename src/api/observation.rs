@@ -1,5 +1,5 @@
 //! Typed view of `GET /bots/{name}/observation`. Every field defaults, so a missing or newly added field
-//! never breaks the bot. Parts the bot does not act on (party, trade, companions…) stay raw JSON.
+//! never breaks the bot. Parts the bot does not act on (storage, companions…) stay raw JSON.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,9 +21,9 @@ pub struct Observation {
     pub dialog: Option<Dialog>,
     pub messages: Vec<Message>,
     pub storage: Option<Value>,
-    pub party: Option<Value>,
-    pub party_invitation: Option<Value>,
-    pub trade: Option<Value>,
+    pub party: Option<Party>,
+    pub party_invitation: Option<PartyInvitation>,
+    pub trade: Option<Trade>,
     pub skill_menu: Option<Value>,
     pub duel_invitation: bool,
 }
@@ -105,6 +105,85 @@ pub struct Player {
     pub x: u16,
     pub y: u16,
     pub attackable: bool,
+    pub job: String,
+    pub dead: bool,
+    /// What the player is hitting, as its sprite shows.
+    pub attack_target: Option<u64>,
+    /// A member of the bot's party.
+    pub party: bool,
+}
+
+/// The party window of the game client.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Party {
+    pub id: u64,
+    pub name: String,
+    /// The leader's name.
+    pub leader: Option<String>,
+    pub exp_share: bool,
+    pub exp_share_denied: bool,
+    pub item_pickup: bool,
+    pub item_share: bool,
+    pub members: Vec<PartyMember>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PartyMember {
+    pub name: String,
+    pub char_id: Option<u64>,
+    pub map: String,
+    pub leader: bool,
+    pub online: bool,
+    /// On the bot's map only.
+    pub x: Option<u16>,
+    pub y: Option<u16>,
+    /// While the member is in sight.
+    pub hp: Option<u32>,
+    pub max_hp: Option<u32>,
+}
+
+impl PartyMember {
+    pub fn pos(&self) -> Option<(u16, u16)> {
+        self.x.zip(self.y)
+    }
+
+    pub fn hp_frac(&self) -> Option<f32> {
+        match (self.hp, self.max_hp) {
+            (Some(hp), Some(max)) if max > 0 => Some(hp as f32 / max as f32),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PartyInvitation {
+    pub party_id: u64,
+    pub inviter: u64,
+    pub inviter_name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Trade {
+    pub partner: u64,
+    pub partner_name: String,
+    /// `requested`, `accepted`, `locked` or `confirmed`.
+    pub phase: String,
+    pub partner_phase: String,
+    pub incoming_request: bool,
+    pub my_items: Vec<TradeItem>,
+    pub partner_items: Vec<TradeItem>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TradeItem {
+    pub item_id: u32,
+    pub name: String,
+    pub amount: u32,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -126,6 +205,8 @@ pub struct Mob {
     pub y: u16,
     pub hp: u32,
     pub max_hp: u32,
+    /// Who the monster is after.
+    pub target: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -230,6 +311,19 @@ impl Observation {
     pub fn last_message_seq(&self) -> u64 {
         self.messages.iter().map(|m| m.seq).max().unwrap_or(0)
     }
+
+    /// A player standing within `radius` cells, by name.
+    pub fn player_near(&self, name: &str, radius: u32) -> Option<&Player> {
+        self.players.iter().find(|p| p.name.eq_ignore_ascii_case(name) && dist((p.x, p.y), self.pos()) <= radius)
+    }
+
+    /// Whether `cell` is on a warp of this map or within `margin` cells of one. Walking there, or through there,
+    /// takes the bot to another map.
+    pub fn near_warp(&self, cell: (u16, u16), margin: u16) -> bool {
+        self.warps.iter().any(|w| {
+            cell.0.abs_diff(w.x) <= w.half_width + margin && cell.1.abs_diff(w.y) <= w.half_height + margin
+        })
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +338,14 @@ mod tests {
                "stats": {"str": 1, "agi": 1, "vit": 1, "int": 1, "dex": 1, "luk": 1}, "x": 156, "y": 191,
                "action": "idle", "moving": false, "attack_target": null, "dead": false},
       "map": {"name": "prontera", "instance": 0, "width": 312, "height": 392},
-      "players": [{"id": 150002, "name": "Other", "x": 150, "y": 190, "attackable": false}],
+      "players": [{"id": 150002, "name": "Other", "x": 150, "y": 190, "attackable": false, "job": "Acolyte", "dead": false,
+                   "attack_target": null, "party": true}],
+      "party": {"id": 1, "name": "Squad", "leader": "Scout", "exp_share": true, "exp_share_denied": false, "item_pickup": true,
+                "item_share": false,
+                "members": [{"name": "Scout", "char_id": 150001, "map": "prontera", "leader": true, "online": true,
+                             "x": null, "y": null, "hp": null, "max_hp": null},
+                            {"name": "Other", "char_id": 150002, "map": "prontera", "leader": false, "online": true,
+                             "x": 150, "y": 190, "hp": 80, "max_hp": 120}]},
       "mobs":    [{"id": 400012, "name": "Poring", "mob_id": 1002, "x": 160, "y": 200, "hp": 50, "max_hp": 50}],
       "npcs":    [{"id": 100123, "name": "Kafra Employee", "x": 151, "y": 29}],
       "items":   [{"id": 400301, "item_id": 909, "name": "Jellopy", "amount": 1, "x": 158, "y": 195}],
@@ -263,7 +364,13 @@ mod tests {
         assert_eq!(obs.me.status_points, 48);
         assert_eq!(obs.mobs[0].name, "Poring");
         assert_eq!(obs.warps[0].to_map, "prt_fild08");
+        assert!(obs.near_warp((158, 21), 0) && obs.near_warp((160, 23), 2) && !obs.near_warp((160, 23), 1));
         assert_eq!(obs.skills[0].range, Some(9));
+        let party = obs.party.as_ref().unwrap();
+        assert_eq!(party.leader.as_deref(), Some("Scout"));
+        assert_eq!(party.members[1].pos(), Some((150, 190)));
+        assert_eq!(party.members[1].hp_frac(), Some(80.0 / 120.0));
+        assert!(obs.players[0].party);
         let prompt = obs.dialog.unwrap().prompt.unwrap();
         assert_eq!(prompt.kind, "menu");
         assert_eq!(prompt.options.len(), 2);

@@ -35,6 +35,12 @@ pub struct StrategicState {
     pub avoid_mobs: Vec<String>,
     /// Short facts the model wants to keep.
     pub notes: Vec<String>,
+    /// The jobs a party role leads to, first then second: the model can not change `job_target` then.
+    #[serde(skip)]
+    pub pinned_jobs: Vec<String>,
+    /// The stat build of a party role: the model can not change `stat_build` then.
+    #[serde(skip)]
+    pub pinned_build: Option<String>,
 }
 
 impl Default for StrategicState {
@@ -46,6 +52,8 @@ impl Default for StrategicState {
             avoid_maps: Vec::new(),
             avoid_mobs: Vec::new(),
             notes: Vec::new(),
+            pinned_jobs: Vec::new(),
+            pinned_build: None,
         }
     }
 }
@@ -69,11 +77,37 @@ impl StrategicState {
         }
     }
 
+    /// Fixes the job path and the build to those of a party role, for a character that is `job` now.
+    pub fn pin_role(&mut self, jobs: &[&str], build: Option<&str>, job: &str) {
+        self.pinned_jobs = jobs.iter().map(|j| (*j).to_owned()).collect();
+        self.pinned_build = build.map(str::to_owned);
+        if let Some(build) = build {
+            self.stat_build = build.to_owned();
+        }
+        self.repin_job(job);
+    }
+
+    /// The next job of the pinned path after `job`, as the job target.
+    fn repin_job(&mut self, job: &str) {
+        if self.pinned_jobs.is_empty() {
+            return;
+        }
+        let at = self.pinned_jobs.iter().position(|j| same_job(j, job));
+        let next = match at {
+            Some(index) => self.pinned_jobs.get(index + 1),
+            None => self.pinned_jobs.first(),
+        };
+        if let Some(next) = next {
+            self.job_target = Some(next.clone());
+            self.objective = truncate(&format!("Play {} for the party: become a {next}.", self.pinned_jobs.join(", then ")), OBJECTIVE_LEN);
+        }
+    }
+
     /// Once the character has become its `job_target`, the target and the objective about it are done: clears the
     /// target and sets the next step as the objective. The model never rewrote them by itself.
     pub fn on_job(&mut self, job: &str) {
         let Some(target) = &self.job_target else { return };
-        let same = |a: &str, b: &str| a.len() >= 3 && b.len() >= 3 && a[..3].eq_ignore_ascii_case(&b[..3]);
+        let same = same_job;
         if same(target, job) {
             self.job_target = None;
             self.objective = if FIRST_JOBS.iter().any(|j| same(j, job)) {
@@ -81,6 +115,7 @@ impl StrategicState {
             } else {
                 truncate(&format!("Grow strong as a {job}: level up safely and gear up."), OBJECTIVE_LEN)
             };
+            self.repin_job(job);
         }
     }
 
@@ -112,6 +147,8 @@ impl StrategicState {
                     }
                     _ => false,
                 },
+                "stat_build" if self.pinned_build.is_some() => false,
+                "job_target" if !self.pinned_jobs.is_empty() => false,
                 "stat_build" => match value.as_str().map(str::to_lowercase) {
                     Some(b) if STAT_BUILDS.contains(&b.as_str()) => {
                         self.stat_build = b;
@@ -213,6 +250,11 @@ fn truncate(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Whether two job names are the same job (`Swordman`, `Swordsman`).
+fn same_job(a: &str, b: &str) -> bool {
+    a.len() >= 3 && b.len() >= 3 && a[..3].eq_ignore_ascii_case(&b[..3])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +335,18 @@ mod tests {
         let r = s.apply_patch(&json!(["nope"]));
         assert_eq!(r.rejected.len(), 1);
         assert_eq!(s, before);
+    }
+
+    #[test]
+    fn a_party_role_pins_the_job_path_and_the_build() {
+        let mut s = StrategicState::default();
+        s.pin_role(&["Acolyte", "Priest"], Some("caster"), "Novice");
+        assert_eq!(s.job_target.as_deref(), Some("Acolyte"));
+        assert_eq!(s.stat_build, "caster");
+        let r = s.apply_patch(&json!({"job_target": "Mage", "stat_build": "melee", "notes": "stay with the party"}));
+        assert_eq!(r.rejected, vec!["job_target", "stat_build"]);
+        assert_eq!(s.job_target.as_deref(), Some("Acolyte"));
+        s.on_job("Acolyte");
+        assert_eq!(s.job_target.as_deref(), Some("Priest"));
     }
 }

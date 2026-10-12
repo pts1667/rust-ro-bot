@@ -194,6 +194,9 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         bot.act(heal.action).await.ok();
     }
     reply_to_chat(bot, r, &obs).await;
+    if bot.party_reflexes(&obs, r.goal.as_ref()).await? {
+        return Ok(());
+    }
 
     let mut ws = world_state(bot, &obs);
     if ws.status_points {
@@ -227,6 +230,14 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         }
     }
     publish(bot, handle, r, &obs, &ws);
+    // In a party, following the leader replaces the hunt; errands still run as planned.
+    if let Some(outcome) = bot.party_step(&obs, r.goal.as_ref()).await? {
+        r.last_outcome = match outcome {
+            Outcome::Failed(reason) => format!("with the party: {reason}"),
+            _ => "with the party".into(),
+        };
+        return Ok(());
+    }
     let Some(goal) = r.goal.clone() else {
         Bot::pause(500).await;
         return Ok(());
@@ -251,6 +262,14 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         return Ok(());
     };
     let Some(step) = steps.first().cloned() else { return Ok(()) };
+    // A leader does not pull more while a member in sight is low on HP and nothing attacks it: it gets its HP back.
+    if matches!(step, Step::Hunt { .. })
+        && bot.member_in_trouble(&obs)
+        && crate::party::attacking_a_member(&obs, &crate::party::member_ids(&obs), crate::party::SIGHT).is_none()
+    {
+        Bot::pause(1500).await;
+        return Ok(());
+    }
     if r.last_step.as_ref() != Some(&step) {
         tracing::info!(goal = %goal.label(), plan = ?steps, "plan");
     }

@@ -53,6 +53,7 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 cargo run -- --key-file "D:/downloads/ro-sppack/rust-ro/config/bots_api_key.txt" --name Goapy probe
 cargo run -- --key-file ... --name Goapy run --minutes 10      # add --no-llm for the deterministic strategist
 cargo run -- --key-file ... --name Goapy llm-check             # one strategist step, prints prompt and decision
+cargo run -- --key-file ... --name Alfa run --party Wayfarers --friends Alfa,Bravo --lead   # one process per member
 cargo run -- db maps/prt_fild08                                # also: db grounds [map], db route from:to
 ```
 

@@ -8,6 +8,7 @@ use rand::Rng;
 use crate::api::{Action, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::state::{HP_FULL, HP_LOW};
+use crate::party::{member_ids, taken_by_others};
 
 const FIGHT_TIMEOUT: Duration = Duration::from_secs(40);
 const POLL_MS: u64 = 400;
@@ -24,6 +25,10 @@ const MAX_SEARCHES: u32 = 8;
 const SEARCH_STEP: i32 = 30;
 /// Search walks keep this far from the map edge, where the warps are.
 const MAP_MARGIN: i32 = 12;
+/// How much more a monster that attacks a party member is worth fighting.
+const ASSIST_BONUS: f32 = 4.0;
+/// Monsters and items this close to a warp are left alone: going for them can step on the warp.
+const WARP_MARGIN: u16 = 2;
 
 /// Offensive skills worth opening a fight with, best first, with their SP cost at level 1 or so.
 const OPENERS: [(&str, u32); 8] = [
@@ -38,15 +43,26 @@ const OPENERS: [(&str, u32); 8] = [
 ];
 
 impl Bot {
-    /// Picks the best monster to fight on this map, if any.
-    async fn pick_target(&mut self, obs: &Observation) -> Result<Option<(u64, String)>> {
+    /// Picks the best monster to fight on this map, if any; within `area` (a cell and a radius) when given. Monsters
+    /// another player fights are theirs; those that attack a party member come first.
+    pub async fn pick_target(&mut self, obs: &Observation, area: Option<((u16, u16), u32)>) -> Result<Option<(u64, String)>> {
         let fighter = self.knowledge.fighter(obs).await?;
         let me = obs.pos();
         let avoid: Vec<String> = self.memory.strategy.avoid_mobs.iter().map(|s| s.to_lowercase()).collect();
+        let members = member_ids(obs);
         let mut best: Option<(f32, u64, String)> = None;
         let mobs = obs.mobs.clone();
         for mob in &mobs {
             if mob.hp == 0 || self.is_blacklisted(mob.id) || avoid.contains(&mob.name.to_lowercase()) {
+                continue;
+            }
+            if taken_by_others(obs, mob.id, mob.target, &members) {
+                continue;
+            }
+            if area.is_some_and(|(center, radius)| dist(center, (mob.x, mob.y)) > radius) {
+                continue;
+            }
+            if obs.near_warp((mob.x, mob.y), WARP_MARGIN) {
                 continue;
             }
             let Some(info) = self.mob_info(mob.mob_id).await else { continue };
@@ -69,7 +85,10 @@ impl Bot {
             let a = fighter.assess(&info);
             let d = dist(me, (mob.x, mob.y)) as f32;
             // Walking costs ~0.15 s a cell: rank by experience per second including the walk.
-            let value = info.exp as f32 / (a.kill_secs + d * 0.15 + 2.0) * (1.0 - a.danger * 0.5);
+            let mut value = info.exp as f32 / (a.kill_secs + d * 0.15 + 2.0) * (1.0 - a.danger * 0.5);
+            if mob.target.is_some_and(|t| t != obs.me.char_id && members.contains(&t)) {
+                value *= ASSIST_BONUS;
+            }
             if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
                 best = Some((value, mob.id, mob.name.clone()));
             }
@@ -83,7 +102,7 @@ impl Bot {
         let pos = self.observe().await?.pos();
         self.loot_near(pos, SWEEP_RADIUS).await?;
         let obs = self.observe().await?;
-        let Some((target, name)) = self.pick_target(&obs).await? else {
+        let Some((target, name)) = self.pick_target(&obs, None).await? else {
             // The observation only shows monsters in sight: walk somewhere else on the map before giving up.
             self.empty_searches += 1;
             if self.empty_searches > MAX_SEARCHES {
@@ -116,6 +135,9 @@ impl Bot {
             };
             let tx = (x + dx).clamp(MAP_MARGIN, (w - MAP_MARGIN).max(MAP_MARGIN)) as u16;
             let ty = (y + dy).clamp(MAP_MARGIN, (h - MAP_MARGIN).max(MAP_MARGIN)) as u16;
+            if obs.near_warp((tx, ty), WARP_MARGIN) {
+                continue;
+            }
             if self.act(Action::Move { x: tx, y: ty, wait: true }).await.is_ok() {
                 tracing::debug!(x = tx, y = ty, "searching for monsters");
                 return Ok(Outcome::Done);
@@ -190,7 +212,9 @@ impl Bot {
     /// up (locked to another player, too heavy) are not tried again for a while.
     async fn loot_near(&mut self, pos: (u16, u16), radius: u32) -> Result<()> {
         let obs = self.observe().await?;
-        let mut items: Vec<_> = obs.items.iter().filter(|i| dist((i.x, i.y), pos) <= radius).cloned().collect();
+        // An item on a warp would take the bot off the map, again each time it comes back.
+        let mut items: Vec<_> =
+            obs.items.iter().filter(|i| dist((i.x, i.y), pos) <= radius && !obs.near_warp((i.x, i.y), WARP_MARGIN)).cloned().collect();
         items.retain(|i| !self.is_blacklisted(i.id));
         items.sort_by_key(|i| dist((i.x, i.y), obs.pos()));
         let before: u32 = obs.inventory.iter().map(|i| i.amount).sum();

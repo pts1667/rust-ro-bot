@@ -6,6 +6,7 @@ mod config;
 mod goap;
 mod knowledge;
 mod memory;
+mod party;
 mod strategist;
 
 use std::collections::HashSet;
@@ -83,7 +84,14 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
         }
     };
     let helper = llm.clone().map(Helper::new);
-    let bot = Bot::new(api, cli.name.clone(), knowledge.clone(), memory, helper);
+    let mut bot = Bot::new(api, cli.name.clone(), knowledge.clone(), memory, helper);
+    if let Some(name) = &args.party {
+        let obs = bot.observe().await?;
+        let config = party::PartyConfig { name: name.clone(), friends: args.friends.clone(), lead: args.lead, role: args.role };
+        tracing::info!(party = %name, friends = ?config.friends, lead = config.lead, role = ?config.role, "playing in a party");
+        bot.memory.strategy.pin_role(args.role.jobs(), args.role.stat_build(), &obs.me.job);
+        bot.party = Some(party::PartyPlay::new(config, obs.last_message_seq()));
+    }
     let handle = strategist::spawn(
         knowledge,
         llm,

@@ -52,6 +52,8 @@ pub struct Bot {
     /// Sequence number of the strategist's latest directive, and of the one the current goal comes from.
     pub latest_directive: Arc<AtomicU64>,
     pub current_directive: u64,
+    /// Playing in a party, when the bot was given one.
+    pub party: Option<crate::party::PartyPlay>,
 }
 
 impl Bot {
@@ -71,6 +73,7 @@ impl Bot {
             blacklist: HashMap::new(),
             latest_directive: Arc::new(AtomicU64::new(0)),
             current_directive: 0,
+            party: None,
         }
     }
 

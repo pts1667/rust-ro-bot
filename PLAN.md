@@ -30,6 +30,8 @@ knowledge (knowledge/)    /db client with disk cache (cache/db), warp graph and 
                           healing (item heal amounts from the /db script, heal skills, VIT/skill bonus)
 memory.rs                 state/<name>.json: Σ, counters, visited maps, kills/deaths, potion shop, bad shops, bad warps,
                           journal
+party/                    playing in a party (--party): forming it, party chat, following the leader, healer/tank roles,
+                          potion trades
 ```
 
 ### Strategist: SKILL.state (arXiv 2608.26263), the default
@@ -68,8 +70,41 @@ only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warp
 exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multiple of max HP), `rest`, and
 `explore:<map>` (up to 2 unvisited maps within 2 warps).
 
+### Parties (party/)
+
+A bot knows its party only as a player does: the party window (members, their map, and on the same map their position
+and HP bar), party chat, and what is in sight (`SIGHT`, 14 cells). Each bot is its own process; nothing passes between
+them another way.
+
+- `--party <name> --friends A,B,C [--lead] [--role healer|tank|fighter]`. The leader creates the party once it has
+  Basic Skill 7 (the server's rule for creating one), invites the friends that are not in it every minute (an
+  invitation fails while the friend is out of the game), and turns experience sharing on (refused while levels are more
+  than 15 apart). The others accept invitations from friends only.
+- Party chat (`party/chat.rs`), plain words a person can type too: `hunting at <map>` (the leader, when its hunt
+  goal changes), `level <base>/<job> <Job>` (on joining and every level), `follow me`, `stay here`, `heal please`
+  (below 40% HP with a healer in sight), `out of potions`, `sending potions to <name>`, `brb, <errand>` and `back`.
+- A member follows the leader (or whoever said `follow me`): to its map with the travel behaviour, then within 7 cells.
+  It fights, in order: a monster attacking a member, what the leader hits (its sprite shows it), the best target within
+  10 cells of the leader. Errands (sell, buy potions, job change, leaving the training grounds) still run as planned,
+  announced with `brb`. A leader away on an errand is not followed.
+- Every bot, solo or not, leaves monsters to other players: one that attacks an outsider or that an outsider hits is
+  not a target. A monster that attacks a member is worth 4x as a target. The leader does not pull more while a member
+  in sight is below 30% HP with nothing attacking it.
+- Roles: healer (Acolyte, then Priest; caster build) heals the member in sight with the lowest HP bar under 60% (or
+  who asked) and keeps Blessing and Increase AGI up (cast times remembered, every 60 s, with half its SP or more);
+  tank (Swordman, then Knight; tank build) provokes monsters that attack another member. A role pins `job_target` and
+  `stat_build`: the strategist's patches to them are refused.
+- Potions: a bot with more than 8 healing items gives what it has over 8 (5 at most) to a member in sight who said
+  `out of potions`, through the trade window (request, offer, lock, confirm). The nearest member goes first (it waits
+  0.4 s a cell, plus a bit by name for ties) and says `sending potions to <name>`; the others hearing it leave it.
+  A bot takes trade requests from members only, locks once the partner locked, then confirms.
+
 ## Verified facts
 
+- Arrivals often land a cell off the warp back (`prt_fild07` -> `prt_fild05` lands at (142,18), next to the warp at
+  (134,14) that spans 14x3 cells). A drop or a monster on the warp cells used to draw the bot onto it, back, and again,
+  every 1.5 s for minutes. Targets, loot, search walks and follow walks now keep 2 cells off warps
+  (`Observation::near_warp`).
 - New characters spawn on `new_1-1` at (53,111). The receptionist on `new_1-2` has the option "Direct access to
   Ragnarok Online.", which sends the character to a random town. This exit is one-way.
 - NPC names in the observation drop the `#suffix` that `/db` keeps (`Tool Dealer` vs `Tool Dealer#prt`). Match shops
@@ -103,6 +138,7 @@ exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multip
 cargo run -- --key-file "D:/downloads/ro-sppack/rust-ro/config/bots_api_key.txt" --name Goapy probe
 cargo run -- --key-file ... --name Goapy run [--minutes N] [--until-level N] [--no-llm] [--llm-share 0.5]
     [--context skill-state|history] [--order task-first|data-first] [--strategist-period 45]
+    [--party Wayfarers --friends Alfa,Bravo,Charlie [--lead] [--role healer|tank|fighter]]
 cargo run -- --key-file ... --name Goapy llm-check                  # one SKILL.state step on the live state
 cargo run -- --key-file ... --name Goapy history-check --turns 10 [--compact-at N --compact-to N] [--model-compaction]
 cargo run -- llm-eval [--n 5] [--order ...] [--no-examples]         # 8 fixed scenarios, no game server needed
@@ -135,4 +171,4 @@ Sampling: `--llm-temp` (default 0.3), `--llm-top-p`, `--llm-top-k`, `--llm-min-p
 - Equipment upgrades (buying or equipping better gear) are not implemented.
 - Bad warps are learned per character (could be shared).
 - Weapons stay the starting ones: a lv 31 Swordsman flees a lv 24 Scorpion. Equipment is the next limit.
-- Storage, parties, trades, pets, vending and the WebSocket API are out of scope for now.
+- Storage, pets, vending and the WebSocket API are out of scope for now.

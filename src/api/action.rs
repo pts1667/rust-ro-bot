@@ -75,6 +75,39 @@ pub enum Action {
     Command {
         text: String,
     },
+    PartyChat {
+        text: String,
+    },
+    PartyCreate {
+        name: String,
+        item_pickup: bool,
+        item_share: bool,
+    },
+    PartyInvite {
+        name: String,
+    },
+    PartyAccept,
+    PartyDecline,
+    PartyOptions {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exp_share: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_pickup: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_share: Option<bool>,
+    },
+    TradeRequest {
+        target: u64,
+    },
+    TradeAccept,
+    TradeDecline,
+    TradeOffer {
+        index: u32,
+        amount: u32,
+    },
+    TradeLock,
+    TradeConfirm,
+    TradeCancel,
 }
 
 impl Action {
@@ -101,6 +134,19 @@ impl Action {
             Action::Skill { .. } => "skill",
             Action::Say { .. } => "say",
             Action::Command { .. } => "command",
+            Action::PartyChat { .. } => "party_chat",
+            Action::PartyCreate { .. } => "party_create",
+            Action::PartyInvite { .. } => "party_invite",
+            Action::PartyAccept => "party_accept",
+            Action::PartyDecline => "party_decline",
+            Action::PartyOptions { .. } => "party_options",
+            Action::TradeRequest { .. } => "trade_request",
+            Action::TradeAccept => "trade_accept",
+            Action::TradeDecline => "trade_decline",
+            Action::TradeOffer { .. } => "trade_offer",
+            Action::TradeLock => "trade_lock",
+            Action::TradeConfirm => "trade_confirm",
+            Action::TradeCancel => "trade_cancel",
         }
     }
 }
@@ -115,5 +161,7 @@ mod tests {
         assert_eq!(json, serde_json::json!({"type": "attack", "target": 7, "wait": false}));
         let json = serde_json::to_value(Action::DialogClose).unwrap();
         assert_eq!(json, serde_json::json!({"type": "dialog_close"}));
+        let json = serde_json::to_value(Action::PartyOptions { exp_share: Some(true), item_pickup: None, item_share: None }).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "party_options", "exp_share": true}));
     }
 }

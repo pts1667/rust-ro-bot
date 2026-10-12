@@ -129,6 +129,18 @@ pub struct RunArgs {
     /// How the strategist keeps context between steps.
     #[arg(long, value_enum, default_value_t = crate::strategist::llm::ContextMode::SkillState)]
     pub context: crate::strategist::llm::ContextMode,
+    /// Play in a party: the name of the party to create when the bot leads it.
+    #[arg(long)]
+    pub party: Option<String>,
+    /// The characters to play with, comma separated: invited when the bot leads, the only invitations it takes.
+    #[arg(long, value_delimiter = ',')]
+    pub friends: Vec<String>,
+    /// Lead the party: create it, invite the friends, choose where to hunt.
+    #[arg(long)]
+    pub lead: bool,
+    /// The bot's part in the party; healer and tank also set the job it heads for.
+    #[arg(long, value_enum, default_value_t = crate::party::Role::Fighter)]
+    pub role: crate::party::Role,
 }
 
 impl Endpoints {
