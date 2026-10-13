@@ -3,6 +3,7 @@
 
 pub mod combat;
 pub mod db;
+pub mod gear;
 pub mod graph;
 pub mod grounds;
 
@@ -24,11 +25,42 @@ pub struct Knowledge {
     equip_stats: Arc<Mutex<HashMap<u32, (u32, u32)>>>,
     /// Average HP each item heals, `None` for items that do not heal HP.
     heals: Arc<Mutex<HashMap<u32, Option<f32>>>>,
+    /// The equipment the weapon and armor dealers sell, read once.
+    gear_catalog: Arc<Mutex<Option<Arc<Vec<db::ItemData>>>>>,
 }
 
 impl Knowledge {
     pub fn new(db: Db) -> Self {
-        Self { graph: WorldGraph::new(db.clone()), db, equip_stats: Default::default(), heals: Default::default() }
+        Self {
+            graph: WorldGraph::new(db.clone()),
+            db,
+            equip_stats: Default::default(),
+            heals: Default::default(),
+            gear_catalog: Default::default(),
+        }
+    }
+
+    /// The best piece of equipment the bot can buy for `budget` zeny, at a shop at most `max_hops` warps away, that
+    /// `next_job` can wear too.
+    pub async fn best_upgrade(
+        &self,
+        obs: &Observation,
+        budget: u64,
+        max_hops: u32,
+        next_job: Option<&str>,
+        bad_shops: &[String],
+    ) -> Result<Option<gear::Upgrade>> {
+        let cached = self.gear_catalog.lock().unwrap().clone();
+        let catalog = match cached {
+            Some(c) => c,
+            None => {
+                let c = Arc::new(gear::shop_catalog(&self.db).await?);
+                *self.gear_catalog.lock().unwrap() = Some(c.clone());
+                c
+            }
+        };
+        let hops: HashMap<String, u32> = self.graph.neighbourhood(&obs.map.name, max_hops).await?.into_iter().collect();
+        Ok(gear::best_upgrade(&catalog, obs, budget, &hops, next_job, bad_shops))
     }
 
     /// Looks up the heal amount of the usable items in the inventory it has not seen yet.
@@ -76,7 +108,7 @@ impl Knowledge {
     pub async fn fighter(&self, obs: &Observation) -> Result<Fighter> {
         let mut weapon_atk = 0;
         let mut armor_def = 0;
-        for item in obs.inventory.iter().filter(|i| i.equipped) {
+        for item in obs.inventory.iter().filter(|i| i.worn_and_usable()) {
             let cached = self.equip_stats.lock().unwrap().get(&item.item_id).copied();
             let (atk, def) = match cached {
                 Some(v) => v,

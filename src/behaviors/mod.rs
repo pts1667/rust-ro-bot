@@ -3,7 +3,9 @@
 pub mod combat;
 pub mod commerce;
 pub mod dialog;
+pub mod gear;
 pub mod progression;
+pub mod quest;
 pub mod travel;
 
 use anyhow::Result;
@@ -27,6 +29,9 @@ impl Bot {
             Step::RaiseStats => self.raise_stats().await,
             Step::LearnSkills => self.learn_skills().await,
             Step::ChangeJob { job } => self.change_job(job).await,
+            Step::BuyGear { item, .. } => self.buy_item(*item, 1, true).await,
+            Step::BuyItem { item, amount, .. } => self.buy_item(*item, *amount, false).await,
+            Step::Quest { id, .. } => self.quest_step(id).await,
         }
     }
 }

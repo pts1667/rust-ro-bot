@@ -44,6 +44,8 @@ pub struct Memory {
     pub kills_by_mob: BTreeMap<String, u64>,
     /// Deaths per monster name that was being fought, or per map.
     pub deaths_by_cause: BTreeMap<String, u64>,
+    /// Fights won and lost per monster since a base level, to stop picking the ones the fight model gets wrong.
+    pub fights: BTreeMap<String, FightRecord>,
     pub potion_shop: Option<ShopSpot>,
     /// Shops the bot could not reach (an NPC behind a counter), as `map:x,y`.
     pub bad_shops: Vec<String>,
@@ -51,11 +53,28 @@ pub struct Memory {
     pub bad_warps: Vec<String>,
     /// Recent happenings for the strategist, newest last, a few dozen at most.
     pub journal: Vec<String>,
+    /// Where the bot stands in each quest it took up.
+    pub quests: crate::quests::QuestBook,
     #[serde(skip)]
     path: PathBuf,
 }
 
 const JOURNAL_LEN: usize = 12;
+
+/// Fights with one monster since the bot was at `level`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FightRecord {
+    pub level: u32,
+    pub kills: u32,
+    pub deaths: u32,
+}
+
+/// Levels after which a record no longer says how the bot fares: it starts over.
+const RECORD_LEVELS: u32 = 5;
+/// Deaths to a monster before its record counts, and the kills each of them must be worth.
+const DEATHS_TO_AVOID: u32 = 3;
+const KILLS_PER_DEATH: u32 = 5;
 
 impl Memory {
     pub fn load(dir: &Path, name: &str) -> Result<Self> {
@@ -67,6 +86,8 @@ impl Memory {
         };
         memory.path = path;
         memory.strategy.repair();
+        memory.bad_shops.sort();
+        memory.bad_shops.dedup();
         Ok(memory)
     }
 
@@ -80,6 +101,35 @@ impl Memory {
         Ok(())
     }
 
+    /// Counts a fight with `mob` at base level `level`.
+    pub fn record_fight(&mut self, mob: &str, level: u32, won: bool) {
+        let record = self.fights.entry(mob.to_owned()).or_default();
+        if record.level + RECORD_LEVELS <= level {
+            *record = FightRecord { level, ..Default::default() };
+        }
+        if won {
+            record.kills += 1;
+        } else {
+            record.deaths += 1;
+        }
+    }
+
+    /// The monsters that keep killing the bot at about its level `level`, whatever the fight model says.
+    pub fn losing_to(&self, level: u32) -> Vec<String> {
+        self.fights
+            .iter()
+            .filter(|(_, r)| r.level + RECORD_LEVELS > level && r.deaths >= DEATHS_TO_AVOID && r.kills < KILLS_PER_DEATH * r.deaths)
+            .map(|(mob, _)| mob.clone())
+            .collect()
+    }
+
+    /// Records a shop the bot cannot buy from (`map:x,y`), once.
+    pub fn mark_bad_shop(&mut self, key: String) {
+        if !self.bad_shops.contains(&key) {
+            self.bad_shops.push(key);
+        }
+    }
+
     /// Adds a line to the journal the strategist reads.
     pub fn note(&mut self, line: impl Into<String>) {
         let line = line.into();
@@ -89,5 +139,35 @@ impl Memory {
             let extra = self.journal.len() - JOURNAL_LEN;
             self.journal.drain(..extra);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_monster_that_keeps_winning_is_left_alone_for_a_few_levels() {
+        let mut m = Memory::default();
+        for _ in 0..2 {
+            m.record_fight("Spore", 20, true);
+        }
+        for _ in 0..2 {
+            m.record_fight("Spore", 20, false);
+        }
+        assert!(m.losing_to(20).is_empty(), "two deaths are bad luck");
+        m.record_fight("Spore", 21, false);
+        assert_eq!(m.losing_to(21), vec!["Spore"]);
+        // Enough kills for each death: the model was right
+        for _ in 0..13 {
+            m.record_fight("Spore", 21, true);
+        }
+        assert!(m.losing_to(21).is_empty());
+        // Five levels on, it gets another chance
+        for _ in 0..3 {
+            m.record_fight("Thief Bug Female", 20, false);
+        }
+        assert_eq!(m.losing_to(24), vec!["Thief Bug Female"]);
+        assert!(m.losing_to(25).is_empty());
     }
 }

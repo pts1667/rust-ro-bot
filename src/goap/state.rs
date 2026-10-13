@@ -1,6 +1,10 @@
 //! The symbolic world state GOAP plans over, derived from an observation.
 
+use std::collections::BTreeMap;
+
 use crate::api::Observation;
+use crate::api::observation::InventoryItem;
+use crate::knowledge::gear::uses_bow;
 
 /// HP share under which the bot rests before fighting.
 pub const HP_LOW: f32 = 0.5;
@@ -12,6 +16,12 @@ pub const POTION_TO_BUY: u32 = 501;
 pub const HEAL_STOCK_MIN: f32 = 1.0;
 /// Healing the bot buys up to, in multiples of its max HP.
 pub const HEAL_STOCK_WANTED: f32 = 2.5;
+/// A bow user with fewer arrows than this goes to buy some.
+pub const ARROW_MIN: u32 = 150;
+/// Arrows a bow user buys (or crafts) up to.
+pub const ARROW_WANTED: u32 = 800;
+/// The arrow the bot buys.
+pub const ARROW_TO_BUY: u32 = 1750;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct WorldState {
@@ -29,6 +39,12 @@ pub struct WorldState {
     pub job_change_ready: bool,
     /// Set by the hunt action only: the observation never says a fight just happened.
     pub hunted: bool,
+    /// A bow user running out of arrows.
+    pub ammo_low: bool,
+    /// The items in the inventory: id and amount.
+    pub items: BTreeMap<u32, u32>,
+    /// The stage each quest the bot took up is at.
+    pub quest_stages: BTreeMap<String, usize>,
 }
 
 /// Facts that come from memory rather than the observation.
@@ -40,21 +56,35 @@ pub struct Extra {
     pub potion_price: u64,
     /// HP the healing items in the inventory would give back.
     pub heal_hp: u32,
+    /// Items not to sell: what the bot's quests ask for.
+    pub keep: Vec<u32>,
+    /// The stage each quest the bot took up is at.
+    pub quest_stages: BTreeMap<String, usize>,
 }
 
 pub fn is_loot(kind: &str, equipped: bool) -> bool {
     if equipped {
         return false;
     }
-    // Healing items have the kind "Healing", so they are never loot.
+    // Healing items have the kind "Healing", so they are never loot. Arrows are kept for a bow.
     // Etc items (Jellopy, Feathers…) and unequipped gear; usable items other than healing are kept for now.
-    matches!(kind, "Etc" | "Weapon" | "Armor" | "Card" | "Ammo" | "") || kind.eq_ignore_ascii_case("etc")
+    matches!(kind, "Etc" | "Weapon" | "Armor" | "Card" | "") || kind.eq_ignore_ascii_case("etc")
+}
+
+/// An inventory item to sell: loot the bot's quests do not ask for.
+pub fn is_loot_item(item: &InventoryItem, keep: &[u32]) -> bool {
+    is_loot(&item.kind, item.equipped) && !keep.contains(&item.item_id)
+}
+
+/// The arrows the bot carries, equipped or not.
+pub fn arrow_count(obs: &Observation) -> u32 {
+    obs.inventory.iter().filter(|i| i.kind.eq_ignore_ascii_case("ammo")).map(|i| i.amount).sum()
 }
 
 impl WorldState {
     pub fn from_observation(obs: &Observation, extra: &Extra) -> Self {
         let me = &obs.me;
-        let loot_items = obs.inventory.iter().filter(|i| is_loot(&i.kind, i.equipped)).map(|i| i.amount).sum::<u32>();
+        let loot_items = obs.inventory.iter().filter(|i| is_loot_item(i, &extra.keep)).map(|i| i.amount).sum::<u32>();
         let price = extra.potion_price.max(1);
         WorldState {
             map: obs.map.name.clone(),
@@ -71,6 +101,12 @@ impl WorldState {
             job_change_ready: !next_jobs(&me.job).is_empty()
                 && me.job_level >= if me.job.eq_ignore_ascii_case("novice") { 10 } else { 40 },
             hunted: false,
+            ammo_low: uses_bow(&me.job) && arrow_count(obs) < ARROW_MIN,
+            items: obs.inventory.iter().fold(BTreeMap::new(), |mut m, i| {
+                *m.entry(i.item_id).or_default() += i.amount;
+                m
+            }),
+            quest_stages: extra.quest_stages.clone(),
         }
     }
 }

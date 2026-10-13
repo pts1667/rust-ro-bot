@@ -30,6 +30,9 @@ pub enum Action {
         wait: bool,
     },
     Stop,
+    /// Sitting doubles natural HP and SP regeneration.
+    Sit,
+    Stand,
     Respawn,
     DialogNext,
     DialogChoose {
@@ -57,6 +60,14 @@ pub enum Action {
     Equip {
         index: u32,
     },
+    Unequip {
+        index: u32,
+    },
+    /// Answers the observation's `skill_menu`.
+    SkillChoose {
+        choice: serde_json::Value,
+    },
+    SkillCancel,
     RaiseStat {
         stat: &'static str,
         amount: u32,
@@ -118,6 +129,12 @@ pub enum Action {
     TradeLock,
     TradeConfirm,
     TradeCancel,
+    /// Joins the waiting room of an NPC (`room_join` with `npc`).
+    #[serde(rename = "room_join")]
+    RoomJoinNpc {
+        npc: u64,
+    },
+    RoomLeave,
 }
 
 impl Action {
@@ -128,6 +145,8 @@ impl Action {
             Action::Use { .. } => "use",
             Action::Attack { .. } => "attack",
             Action::Stop => "stop",
+            Action::Sit => "sit",
+            Action::Stand => "stand",
             Action::Respawn => "respawn",
             Action::DialogNext => "dialog_next",
             Action::DialogChoose { .. } => "dialog_choose",
@@ -139,6 +158,9 @@ impl Action {
             Action::DialogSell { .. } => "dialog_sell",
             Action::UseItem { .. } => "use_item",
             Action::Equip { .. } => "equip",
+            Action::Unequip { .. } => "unequip",
+            Action::SkillChoose { .. } => "skill_choose",
+            Action::SkillCancel => "skill_cancel",
             Action::RaiseStat { .. } => "raise_stat",
             Action::LearnSkill { .. } => "learn_skill",
             Action::Skill { .. } => "skill",
@@ -162,6 +184,8 @@ impl Action {
             Action::TradeLock => "trade_lock",
             Action::TradeConfirm => "trade_confirm",
             Action::TradeCancel => "trade_cancel",
+            Action::RoomJoinNpc { .. } => "room_join",
+            Action::RoomLeave => "room_leave",
         }
     }
 }
@@ -179,5 +203,6 @@ mod tests {
         let json = serde_json::to_value(Action::PartyOptions { exp_share: Some(true), item_pickup: None, item_share: None }).unwrap();
         assert_eq!(json, serde_json::json!({"type": "party_options", "exp_share": true}));
         assert_eq!(serde_json::to_value(Action::BookingSearch).unwrap(), serde_json::json!({"type": "booking_search"}));
+        assert_eq!(serde_json::to_value(Action::RoomJoinNpc { npc: 9 }).unwrap(), serde_json::json!({"type": "room_join", "npc": 9}));
     }
 }

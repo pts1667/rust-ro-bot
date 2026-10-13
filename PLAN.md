@@ -139,9 +139,14 @@ them another way.
 - Mob `mode & 0x4` is aggressive (Mandragora `0x84`). Poring `0x83` and Lunatic `0x81` are passive.
 - Observation `weight` uses the same unit as `/db` item weight (tenths). Max weight is about the job base (Novice
   20000) plus 300 per STR.
-- Server rates: 5x base and job exp, 1% base exp lost on death.
+- Server rates: 1x base and job exp (`base_exp_rate`, `job_exp_rate` in the server's `config.json`), 1% base exp lost
+  on death.
 - llama.cpp tool calls do not enforce the `enum` of a tool argument: the model can commit option ids that were not
   offered.
+- Trading needs Basic Skill 1 on both sides (`Trading needs Basic Skill level 1`), and the range is 2 cells. The server
+  silently drops a trade request to someone who has a party invitation to answer: invite after the trade, or let them
+  answer first.
+- A second party invitation to someone who has one pending is refused (`… already has an invitation to answer`).
 
 ## Commands
 
@@ -177,9 +182,41 @@ Sampling: `--llm-temp` (default 0.3), `--llm-top-p`, `--llm-top-k`, `--llm-min-p
 - 60 min from base ~28, 2026-10-12: history mode at 100% LLM 28 -> 33, SKILL.state at 50% 28 -> 32, code only
   28 -> 33. The strategists are still about even.
 
+- 2026-10-13, 5 h 20 min, code-only strategist (`--no-llm --solo --job …`), seven bots from base ~16, server at 10x
+  for the run: Charlie (Swordsman) 45/33, Lancel (Swordsman) 44/32, Anvil (Merchant) 41/35, Ember (Mage) 28/21,
+  Fletch (Archer) 28/22, Mercy (Acolyte) 23/16, Shade (Thief) 21/15. Deaths: Mercy 53, Charlie and Fletch 6,
+  Ember 4, Lancel 3, Anvil 1, Shade 0. Gear buying works (Katana, Guard, Hat, Jacket, Sandals, Bandana). This run
+  used the binary from before the chat work and the next-job gear filter (Mercy still bought an Axe).
+
 ## Open items
 
-- Equipment upgrades (buying or equipping better gear) are not implemented.
+Fixed after the 2026-10-13 run, not yet run live:
+
+- Shade's loop: a skill quest's book entry is made when any of its options is taken (`quest:<id>`), so a stage goal
+  no longer reads as done before it starts.
+- Shops that would not open: gear, quest and potion buying all skip `bad_shops`, and a shop that will not open once
+  the bot stands next to it goes there (deduplicated). Charlie had listed the Tool Dealer on `ein_in01` 19 times and
+  still went back. Why the Ammunition dealer on `prontera` (custom `itemmall.txt`) never opens is still to be seen
+  live; its list has bullets and kunai (13200+), which the pre-renewal item table may lack.
+- Mercy's deaths: worn items the job can no longer wear (`why_not` set, a Novice's Axe on an Acolyte) count for
+  nothing in the fight model and in gear values, so a weapon of the job gets bought. A monster that killed the bot
+  3 times with fewer than 5 kills per death is avoided for 5 base levels (`Memory::fights`, `losing_to`), in target
+  choice and in hunt and quest options.
+- Rest sits (the server halves the regeneration interval for a sitting character), stands to heal or fight back,
+  fights what targets the bot, and counts 20% of max HP regained as enough. Mages keep casting bolts during a fight
+  instead of only opening with one.
+- Routes go by map part (`region`), not by map: a warp in a closed-off room is no way out (`ra_in01` jail warp to
+  `morocc`, the auction halls), and the floors of a tower are walked through its own warps (`geffen` -> `gef_tower`
+  9 -> 10 -> 8 -> 4 -> `gef_dun00` -> `gef_dun01`). `route_into` reaches a room through another door of the town
+  outside when the rooms do not connect inside (`prt_in` 18 -> 11 for the Play Dead quest).
+- Status points left that the build cannot spend yet are kept for the next level without a failed retry.
+- `recruit::takes` uses only levels a stranger gave (booking ad, "party? level 12/9"); the prompt no longer names an
+  experience rate.
+
+Still open:
+
+- Not tested live: JoinParty, thanks after a gift (needs a partner with Basic Skill 1), the loop guard between two
+  LLM bots, the next-job gear filter.
+
 - Bad warps are learned per character (could be shared).
-- Weapons stay the starting ones: a lv 31 Swordsman flees a lv 24 Scorpion. Equipment is the next limit.
 - Storage, pets, vending and the WebSocket API are out of scope for now.

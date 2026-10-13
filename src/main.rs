@@ -7,6 +7,8 @@ mod goap;
 mod knowledge;
 mod memory;
 mod party;
+mod quests;
+mod social;
 mod strategist;
 
 use std::collections::HashSet;
@@ -85,6 +87,12 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
     };
     let helper = llm.clone().map(Helper::new);
     let mut bot = Bot::new(api, cli.name.clone(), knowledge.clone(), memory, helper);
+    if let Some(job) = &args.job {
+        let Some((path, build)) = strategist::skill_state::job_path(job) else { bail!("unknown job {job}") };
+        let obs = bot.observe().await?;
+        tracing::info!(?path, build, "heading for a job");
+        bot.memory.strategy.pin_role(&path, Some(build), &obs.me.job);
+    }
     if let Some(name) = &args.party {
         let obs = bot.observe().await?;
         let config =
@@ -126,7 +134,7 @@ async fn live_snapshot(cli: &Cli, knowledge: &Knowledge) -> Result<(strategist::
     knowledge.graph.forbid(memory.bad_warps.iter().cloned());
     knowledge.learn_heals(&obs).await;
     let heal_hp = knowledge.heal_stock(&obs);
-    let ws = goap::WorldState::from_observation(&obs, &goap::state::Extra { near_shop: false, potion_price: 50, heal_hp });
+    let ws = goap::WorldState::from_observation(&obs, &goap::state::Extra { near_shop: false, potion_price: 50, heal_hp, ..Default::default() });
     let snap = Snapshot {
         heal_hp,
         heal_items: knowledge.heal_items(&obs),
@@ -228,6 +236,14 @@ async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> 
         for g in grounds {
             println!("{:6.3} {}", g.score, g.describe());
         }
+        return Ok(());
+    }
+    if path == "gear" {
+        let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
+        let obs = api.observation(&cli.name).await?;
+        let budget = behaviors::gear::gear_budget(obs.me.zeny, 50);
+        println!("{:?}", knowledge::gear::Worn::of(&obs));
+        println!("budget {budget}: {:#?}", knowledge.best_upgrade(&obs, budget, 10, None, &[]).await?);
         return Ok(());
     }
     if path == "go" {

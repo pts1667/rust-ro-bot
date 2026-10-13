@@ -101,6 +101,10 @@ impl Bot {
             return Ok(Outcome::failed("no stat could be raised"));
         }
         let obs = self.observe().await?;
+        // The points left are too few for the next stat of the build: kept for the next level, not tried again now
+        if obs.me.status_points > 0 {
+            self.stats_stuck_at = Some(obs.me.status_points);
+        }
         let s = &obs.me.stats;
         self.memory.note(format!(
             "raised {} stat points ({} build): str {} agi {} vit {} int {} dex {} luk {}",
@@ -163,7 +167,7 @@ impl Bot {
         let intent = Intent {
             goal: format!("Change job from Novice to {job}. Accept the job change."),
             keywords: job_keywords(job).into_iter().chain(["yes".to_owned(), "change".to_owned()]).collect(),
-            text_answer: None,
+            ..Default::default()
         };
         let end = self.run_dialog(dialog_of(&result), &intent).await?;
         let after = self.observe().await?;

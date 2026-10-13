@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::api::Action;
 use crate::api::observation::Dialog;
 use crate::bot::Bot;
+use crate::quests::normalize;
 
 const MAX_DIALOG_STEPS: usize = 60;
 
@@ -19,6 +20,20 @@ pub struct Intent {
     pub keywords: Vec<String>,
     /// Answer to text prompts; the bot's name when empty.
     pub text_answer: Option<String>,
+    /// Quiz answers: when a line said since the last menu contains the first text, the entry matching the second
+    /// is picked, or the second is typed into a text or number prompt (`{name}`: the bot's name).
+    pub answers: Vec<(String, String)>,
+    /// Menus ask to say back what the NPC said before the first one, line by line (a pledge to recite).
+    pub recite: bool,
+}
+
+/// The entry that says the next line of what was heard (`heard[from..]`), and where the heard lines go on after it.
+pub fn recite_next(heard: &[String], from: usize, options: &[String]) -> Option<(u32, usize)> {
+    let clean = |s: &str| normalize(s).trim_matches(|c: char| !c.is_alphanumeric()).to_owned();
+    heard.iter().enumerate().skip(from).find_map(|(i, line)| {
+        let line = clean(line);
+        options.iter().position(|o| !line.is_empty() && clean(o) == line).map(|o| (o as u32 + 1, i + 1))
+    })
 }
 
 #[derive(Debug)]
@@ -43,6 +58,129 @@ pub fn match_option(options: &[String], keywords: &[String]) -> Option<u32> {
     })
 }
 
+/// The answer of `answers` whose question is in `lines` (a question may span several lines), the one asked last
+/// when several are.
+#[cfg(test)]
+pub fn known_answer<'a>(lines: &[String], answers: &'a [(String, String)]) -> Option<&'a str> {
+    known_answers(lines, answers).into_iter().next()
+}
+
+/// Every answer whose question is in `lines`, the question asked last first: quizzes ask alike questions with
+/// other choices, so the right one is the first among the choices.
+pub fn known_answers<'a>(lines: &[String], answers: &'a [(String, String)]) -> Vec<&'a str> {
+    let text = normalize(&lines.join(" "));
+    let mut found: Vec<(usize, &str)> = answers.iter().filter_map(|(q, a)| text.rfind(&normalize(q)).map(|at| (at, a.as_str()))).collect();
+    found.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    found.into_iter().map(|(_, a)| a).collect()
+}
+
+/// The value of the last sum asked (`(47 * 28) - (1376 / 4) = ?`), worked out as anyone would.
+pub fn sum_asked(lines: &[String]) -> Option<i64> {
+    lines.iter().rev().find_map(|line| {
+        let (expr, rest) = line.split_once('=')?;
+        if !rest.trim().starts_with('?') {
+            return None;
+        }
+        let tokens: Vec<char> = expr.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut at = 0;
+        let value = sum(&tokens, &mut at)?;
+        (at == tokens.len()).then_some(value)
+    })
+}
+
+fn sum(t: &[char], at: &mut usize) -> Option<i64> {
+    let mut value = product(t, at)?;
+    while let Some(&op) = t.get(*at).filter(|c| matches!(c, '+' | '-')) {
+        *at += 1;
+        let next = product(t, at)?;
+        value = if op == '+' { value + next } else { value - next };
+    }
+    Some(value)
+}
+
+fn product(t: &[char], at: &mut usize) -> Option<i64> {
+    let mut value = factor(t, at)?;
+    while let Some(&op) = t.get(*at).filter(|c| matches!(c, '*' | 'x' | '/')) {
+        *at += 1;
+        let next = factor(t, at)?;
+        value = if op == '/' { value.checked_div(next)? } else { value * next };
+    }
+    Some(value)
+}
+
+fn factor(t: &[char], at: &mut usize) -> Option<i64> {
+    if t.get(*at) == Some(&'(') {
+        *at += 1;
+        let value = sum(t, at)?;
+        (t.get(*at) == Some(&')')).then(|| *at += 1)?;
+        return Some(value);
+    }
+    let start = *at;
+    while t.get(*at).is_some_and(|c| c.is_ascii_digit() || *c == ',') {
+        *at += 1;
+    }
+    t[start..*at].iter().filter(|c| **c != ',').collect::<String>().parse().ok()
+}
+
+/// The one entry (1-based) whose word can be spelled with the letters of the last puzzle line (`t m y a n y e o b`).
+pub fn hidden_word(lines: &[String], options: &[String]) -> Option<u32> {
+    let letters: Vec<char> = lines.iter().rev().find_map(|line| {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        (parts.len() >= 8 && parts.iter().all(|p| p.len() == 1 && p.chars().all(|c| c.is_ascii_alphabetic())))
+            .then(|| parts.iter().flat_map(|p| p.chars()).map(|c| c.to_ascii_lowercase()).collect())
+    })?;
+    let fits = |word: &str| {
+        let mut left = letters.clone();
+        word.chars().filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_ascii_lowercase()).all(|c| match left.iter().position(|l| *l == c) {
+            Some(i) => {
+                left.swap_remove(i);
+                true
+            }
+            None => false,
+        })
+    };
+    let found: Vec<usize> = (0..options.len()).filter(|&i| fits(&options[i])).collect();
+    (found.len() == 1).then(|| found[0] as u32 + 1)
+}
+
+/// The line where the highlight (`^3377FF...^000000`) of the page ends, as written: a song to sing along to, the NPC
+/// colouring how far it got.
+pub fn highlighted_line(lines: &[String]) -> Option<String> {
+    let code = |s: &str, at: usize| s.get(at + 1..at + 7).is_some_and(|h| h.chars().all(|c| c.is_ascii_hexdigit()));
+    let mut on = false;
+    let mut last = None;
+    for line in lines {
+        let mut text = String::new();
+        let mut rest = line.as_str();
+        while let Some(at) = rest.find('^') {
+            if !code(rest, at) {
+                text.push_str(&rest[..=at]);
+                rest = &rest[at + 1..];
+                continue;
+            }
+            text.push_str(&rest[..at]);
+            let closing = &rest[at + 1..at + 7] == "000000";
+            if on && closing {
+                last = Some(text.trim().to_owned());
+            }
+            on = !closing;
+            rest = &rest[at + 7..];
+        }
+    }
+    last.filter(|l| !l.is_empty())
+}
+
+/// The entry (1-based) that is the answer: equal to it, else containing it.
+pub fn option_for(options: &[String], answer: &str) -> Option<u32> {
+    let answer = normalize(answer);
+    let clean = |o: &String| normalize(o).trim_matches(|c: char| !c.is_alphanumeric()).to_owned();
+    options
+        .iter()
+        .position(|o| clean(o) == answer.trim_matches(|c: char| !c.is_alphanumeric()))
+        .or_else(|| options.iter().position(|o| normalize(o).contains(&answer)))
+        .map(|i| i as u32 + 1)
+}
+
 /// The option that most likely ends the conversation without commitment.
 pub fn safe_option(options: &[String]) -> u32 {
     const EXITS: [&str; 7] = ["cancel", "quit", "end", "no", "leave", "exit", "nothing"];
@@ -59,6 +197,12 @@ impl Bot {
         let mut dialog = first;
         let mut seen_menus: Vec<String> = Vec::new();
         let mut transcript: Vec<String> = Vec::new();
+        // Where the lines said since the last menu answer start: the question of a quiz is among them.
+        let mut since_menu = 0;
+        // For a recitation: what was said before the first menu, and how far it was said back.
+        let mut heard: Option<Vec<String>> = None;
+        let mut recited = 0;
+        self.last_dialog.clear();
         for _ in 0..MAX_DIALOG_STEPS {
             let Some(d) = dialog.take() else {
                 let obs = self.observe().await?;
@@ -70,12 +214,30 @@ impl Bot {
                     _ => return Ok(DialogEnd::Closed),
                 }
             };
-            transcript.extend(d.lines.iter().cloned());
+            // A page may come as one text of several lines.
+            let lines: Vec<String> =
+                d.lines.iter().flat_map(|l| l.split('\n')).map(|l| l.trim_end().to_owned()).filter(|l| !l.is_empty()).collect();
+            transcript.extend(lines.iter().cloned());
+            self.last_dialog.extend(lines);
             let kind = d.prompt.as_ref().map(|p| p.kind.clone()).unwrap_or_default();
+            tracing::debug!(lines = ?d.lines, %kind, "dialog page");
+            let candidates: Vec<String> = known_answers(&transcript[since_menu..], &intent.answers).iter().map(|a| a.replace("{name}", &self.name)).collect();
+            let known = candidates.first().cloned();
             let action = match kind.as_str() {
                 "next" => Action::DialogNext,
-                "text" => Action::DialogText { text: intent.text_answer.clone().unwrap_or_else(|| self.name.clone()) },
-                "number" => Action::DialogNumber { value: 1 },
+                "text" => {
+                    since_menu = transcript.len();
+                    let sung = if intent.recite { highlighted_line(&d.lines) } else { None };
+                    let text = known.or(sung).or_else(|| intent.text_answer.clone()).unwrap_or_else(|| self.name.clone());
+                    tracing::info!(%text, "dialog text");
+                    Action::DialogText { text }
+                }
+                "number" => {
+                    let value = known.and_then(|a| a.trim().parse::<i64>().ok()).or_else(|| sum_asked(&transcript[since_menu..])).unwrap_or(1);
+                    since_menu = transcript.len();
+                    tracing::info!(value, "dialog number");
+                    Action::DialogNumber { value }
+                }
                 "running" => {
                     Bot::pause(300).await;
                     continue;
@@ -90,7 +252,20 @@ impl Bot {
                         self.act(Action::DialogClose).await?;
                         return Ok(DialogEnd::GaveUp(format!("menu repeats: {options:?}")));
                     }
-                    let option = self.choose_option(&transcript, &options, intent, repeats).await;
+                    let heard = heard.get_or_insert_with(|| transcript.clone());
+                    let recital = if intent.recite { recite_next(heard, recited, &options) } else { None };
+                    let option = match (recital, candidates.iter().find_map(|a| option_for(&options, a))) {
+                        (Some((i, next)), _) => {
+                            recited = next;
+                            i
+                        }
+                        (None, Some(i)) => i,
+                        (None, None) => match hidden_word(&transcript[since_menu..], &options) {
+                            Some(i) => i,
+                            None => self.choose_option(&transcript, &options, intent, repeats).await,
+                        },
+                    };
+                    since_menu = transcript.len();
                     tracing::info!(option, choice = %options[option as usize - 1], "dialog menu");
                     Action::DialogChoose { option }
                 }
@@ -131,6 +306,37 @@ impl Bot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_song_line_sung_last_is_the_highlighted_one() {
+        let page = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(highlighted_line(&page(&["^3377FFThere was a man^000000", "who was said to be immortal."])), Some("There was a man".into()));
+        assert_eq!(
+            highlighted_line(&page(&["^3377FFThere was a man", "who was said to be immortal.^000000", "His name Jichfreid,"])),
+            Some("who was said to be immortal.".into())
+        );
+        assert_eq!(highlighted_line(&page(&["Nothing coloured here."])), None);
+    }
+
+    #[test]
+    fn sums_are_worked_out() {
+        let ask = |s: &str| sum_asked(&["[Raspuchin Gregory]".to_owned(), s.to_owned()]);
+        assert_eq!(ask("12 + 23 + 34 + 45 = ?"), Some(114));
+        assert_eq!(ask("1000 - 36 - 227 - 348 = ?"), Some(389));
+        assert_eq!(ask("9765 / 3 / 5 / 7 = ?"), Some(93));
+        assert_eq!(ask("(47 * 28) - (1376 / 4) = ?"), Some(972));
+        assert_eq!(ask("(2646 / 7) + (13 * 28) = ?"), Some(742));
+        assert_eq!(ask("What is the total weight?"), None);
+    }
+
+    #[test]
+    fn the_hidden_word_is_the_one_the_letters_spell() {
+        let lines = |s: &str| vec!["[Nicholas Flamel]".to_owned(), s.to_owned()];
+        assert_eq!(hidden_word(&lines("t m y a n y e o b n e g p r i"), &opts(&["Brake", "Brass", "Bug", "Broken", "Brigan?"])), Some(5));
+        assert_eq!(hidden_word(&lines("g b n o p r e f a r e t a s k"), &opts(&["purple", "smoker", "ragnarok", "bolt", "burnt wood"])), Some(3));
+        assert_eq!(hidden_word(&lines("r o e h n r o m c a i n p t t"), &opts(&["forgemerchant", "potionmerchant", "dcmerchant", "vendingmerchant", "battlemerchant"])), Some(2));
+        assert_eq!(hidden_word(&lines("Pick one."), &opts(&["a", "b"])), None);
+    }
+
     use super::*;
 
     fn opts(v: &[&str]) -> Vec<String> {
@@ -143,6 +349,36 @@ mod tests {
         assert_eq!(match_option(&options, &["direct access".into()]), Some(2));
         assert_eq!(match_option(&options, &["nope".into(), "cancel".into()]), Some(3));
         assert_eq!(match_option(&options, &["nope".into()]), None);
+    }
+
+    #[test]
+    fn quiz_answers_follow_the_question() {
+        let answers = vec![("not affected by the Two Hand Quicken".to_owned(), "Flamberge".to_owned()), ("Bowling Bash".to_owned(), "Provoke".to_owned())];
+        let lines = vec!["[Sir Siracuse]".to_owned(), "Which of the following weapons are ^0000FFnot affected by the Two Hand Quicken^000000 skill?".to_owned()];
+        let a = known_answer(&lines, &answers).unwrap();
+        assert_eq!(option_for(&opts(&["Katana", "Slayer", "Broadsword", "Flamberge"]), a), Some(4));
+        assert_eq!(option_for(&opts(&["Two Handed Sword Mastery Lv.5", "Provoke Lv.10"]), "Provoke"), Some(2));
+        // An exact entry beats one that merely contains the answer.
+        assert_eq!(option_for(&opts(&["Level 30", "Level 3"]), "Level 3"), Some(2));
+        assert_eq!(known_answer(&["Hello".to_owned()], &answers), None);
+        // Split over lines, and the latest question wins.
+        let answers = vec![("how should you act within".to_owned(), "Protect".to_owned()), ("Novice".to_owned(), "hunting".to_owned())];
+        let lines = vec!["A Novice? Fine.".to_owned(), "Now, how should".to_owned(), "you act within".to_owned(), "a party?".to_owned()];
+        assert_eq!(known_answer(&lines, &answers), Some("Protect"));
+        // Alike questions: the answer that is among the choices.
+        let alike = vec![("different type than the others".to_owned(), "Aster".to_owned()), ("different type than the others".to_owned(), "Marin".to_owned())];
+        let asked = vec!["4. Choose the monster that is a different type than the others.".to_owned()];
+        let options = opts(&["Aster", "Marc", "Marse", "Marin"]);
+        assert_eq!(known_answers(&asked, &alike).iter().find_map(|a| option_for(&options[1..], a)), Some(3));
+    }
+
+    #[test]
+    fn a_pledge_is_said_back_in_order() {
+        let heard: Vec<String> = ["[Touha]", "Now, pay attention", "I seek the path", "[Touha]", "of enlightenment.", "We monks"].iter().map(|s| s.to_string()).collect();
+        let options = opts(&["We monks", "of enlightenment.", "I seek the path"]);
+        assert_eq!(recite_next(&heard, 0, &options), Some((3, 3)));
+        assert_eq!(recite_next(&heard, 3, &options), Some((2, 5)));
+        assert_eq!(recite_next(&heard, 5, &options), Some((1, 6)));
     }
 
     #[test]

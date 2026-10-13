@@ -48,10 +48,32 @@ enum Walk {
     Dead { attacker: Option<String> },
     /// Something the bot can beat attacks it: fight back, then walk on.
     FightBack { target: u64, name: String },
+    /// A new goal, or someone talking to the bot: it stops where it is.
+    Preempted,
 }
 
 fn journey(result: &Value) -> &str {
     result.get("journey").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The first door of the shortest way between two rooms, doors being (from room, cell, to room).
+fn first_door(doors: &[(u32, (u16, u16), u32)], from: u32, to: u32) -> Option<(u16, u16)> {
+    let mut first: std::collections::HashMap<u32, (u16, u16)> = std::collections::HashMap::new();
+    let mut queue = std::collections::VecDeque::from([from]);
+    let mut seen = HashSet::from([from]);
+    while let Some(room) = queue.pop_front() {
+        if room == to {
+            return first.get(&to).copied();
+        }
+        for (a, cell, b) in doors.iter().filter(|(a, _, _)| *a == room) {
+            if seen.insert(*b) {
+                let door = if *a == from { *cell } else { first[a] };
+                first.insert(*b, door);
+                queue.push_back(*b);
+            }
+        }
+    }
+    None
 }
 
 /// The warp of the observation that matches a warp of the database: same destination, nearest position.
@@ -60,6 +82,92 @@ fn matching_warp<'a>(obs: &'a Observation, edge: &Edge) -> Option<&'a Warp> {
 }
 
 impl Bot {
+    /// The warp from `here` into the room of `target` where `spot` is: one landing in the spot's walkable region,
+    /// else the one landing nearest to it.
+    async fn door_into(&self, here: &str, target: &str, spot: (u16, u16), skip: &HashSet<String>) -> Result<Option<Edge>> {
+        let doors: Vec<Edge> =
+            self.knowledge.graph.edges(here).await?.into_iter().filter(|e| e.to == target && !skip.contains(&e.key())).collect();
+        if let Ok(data) = self.knowledge.db.map(target).await {
+            let region = data.npcs.iter().filter(|n| dist((n.x, n.y), spot) <= 2).min_by_key(|n| dist((n.x, n.y), spot)).and_then(|n| n.region);
+            if let Some(region) = region {
+                let lands_there = |e: &&Edge| {
+                    data.arrivals.iter().any(|a| a.from.map.id_str() == here && a.from.x == e.x && a.from.y == e.y && a.land.region == Some(region))
+                };
+                if let Some(e) = doors.iter().find(lands_there) {
+                    return Ok(Some(e.clone()));
+                }
+            }
+        }
+        Ok(doors.into_iter().min_by_key(|e| dist((e.to_x, e.to_y), spot)))
+    }
+
+    /// Goes into the part `region` of `map` by any warps, out of the map and back in through another door when the
+    /// rooms do not connect inside (Nami's room and the Chivalry Member's on `prt_in`).
+    pub async fn travel_into(&mut self, map: &str, region: u32) -> Result<Outcome> {
+        let mut skip: HashSet<String> = HashSet::new();
+        let avoid: HashSet<String> = self.memory.strategy.avoid_maps.iter().cloned().collect();
+        for _ in 0..MAX_LEGS {
+            if self.preempted() {
+                return Ok(Outcome::Preempted);
+            }
+            let obs = self.observe().await?;
+            if obs.map.name == map && obs.me.region.is_none_or(|r| r == region) {
+                return Ok(Outcome::Done);
+            }
+            let route = self.knowledge.graph.route_into(&obs.map.name, obs.me.region, map, Some(region), &avoid, &skip).await?;
+            let Some(edge) = route.as_ref().and_then(|r| r.first()) else {
+                return Ok(Outcome::failed(format!("no known way into that room of {map}")));
+            };
+            tracing::info!(from = %obs.map.name, to = %edge.to, room = region, "into a room");
+            match self.take_warp(&obs, edge).await? {
+                Outcome::Done => {}
+                Outcome::Preempted => return Ok(Outcome::Preempted),
+                Outcome::Failed(reason) => {
+                    if self.observe().await?.me.dead {
+                        return Ok(Outcome::Failed(reason));
+                    }
+                    skip.insert(edge.key());
+                }
+            }
+        }
+        Ok(Outcome::failed(format!("too many warps on the way into {map}")))
+    }
+
+    /// Walks to another room (region) of the map the bot is on, through the warps between its rooms. True once there.
+    pub async fn reach_region(&mut self, target: u32) -> Result<bool> {
+        for _ in 0..8 {
+            let obs = self.observe().await?;
+            let Some(at) = obs.me.region else { return Ok(false) };
+            if at == target {
+                return Ok(true);
+            }
+            let here = obs.map.name.clone();
+            let Ok(data) = self.knowledge.db.map(&here).await else { return Ok(false) };
+            // The warps from room to room: where each is, and the room it lands in.
+            let doors: Vec<(u32, (u16, u16), u32)> = data
+                .arrivals
+                .iter()
+                .filter(|a| a.from.map.id_str() == here)
+                .filter_map(|a| Some((a.from.region?, (a.from.x, a.from.y), a.land.region?)))
+                .collect();
+            let Some(first) = first_door(&doors, at, target) else {
+                tracing::info!(map = %here, from = at, to = target, "no way between the rooms");
+                return Ok(false);
+            };
+            tracing::info!(map = %here, from = at, to = target, door = ?first, "through a door to another room");
+            let action = match obs.warps.iter().find(|w| w.region.is_none_or(|r| r == at) && dist((w.x, w.y), first) <= 1) {
+                Some(w) => Action::Use { target: w.id },
+                None => Action::Move { x: first.0, y: first.1, wait: true },
+            };
+            if let Err(error) = self.act(action).await {
+                tracing::warn!(%error, "could not take the door");
+                return Ok(false);
+            }
+            Bot::pause(600).await;
+        }
+        Ok(false)
+    }
+
     pub async fn travel(&mut self, target: &str) -> Result<Outcome> {
         let mut failures = 0;
         // `@go` is the way out of a map the graph cannot leave (guards instead of warps, wrong guesses), once a trip.
@@ -67,7 +175,10 @@ impl Bot {
         // Warps in another room than the bot's, left out for this trip only.
         let mut skip: HashSet<String> = HashSet::new();
         // Interior maps are several rooms: into the shop's map, take the warp that lands nearest to the shop.
-        let near = self.memory.potion_shop.as_ref().filter(|s| s.map == target).map(|s| (s.x, s.y));
+        let near = match &self.travel_spot {
+            Some((map, spot)) if map == target => Some(*spot),
+            _ => self.memory.potion_shop.as_ref().filter(|s| s.map == target).map(|s| (s.x, s.y)),
+        };
         // Maps on the way with an aggressive monster that kills in two hits, avoided when another way exists.
         let mut deadly: HashSet<String> = HashSet::new();
         let mut checked: HashSet<String> = HashSet::new();
@@ -91,7 +202,7 @@ impl Bot {
             let mut route = None;
             for _ in 0..5 {
                 let around: HashSet<String> = avoid.union(&deadly).cloned().collect();
-                let Some(r) = self.knowledge.graph.route_skipping(&here, target, &around, &skip).await? else { break };
+                let Some(r) = self.knowledge.graph.route_skipping(&here, obs.me.region, target, &around, &skip).await? else { break };
                 let mut found = false;
                 for map in r.iter().map(|e| e.to.as_str()).filter(|m| *m != target) {
                     if !checked.insert(map.to_owned()) {
@@ -111,7 +222,7 @@ impl Bot {
             }
             // No way around: cross it anyway, fleeing what attacks.
             if route.is_none() && !deadly.is_empty() {
-                route = self.knowledge.graph.route_skipping(&here, target, &avoid, &skip).await?;
+                route = self.knowledge.graph.route_skipping(&here, obs.me.region, target, &avoid, &skip).await?;
             }
             let Some(mut route) = route else {
                 if !went && self.go_near(target, &here).await? {
@@ -120,18 +231,10 @@ impl Bot {
                 }
                 return Ok(Outcome::failed(format!("no known route from {here} to {target}")));
             };
-            if let (1, Some(near)) = (route.len(), near) {
-                let closest = self
-                    .knowledge
-                    .graph
-                    .edges(&here)
-                    .await?
-                    .into_iter()
-                    .filter(|e| e.to == target && !skip.contains(&e.key()))
-                    .min_by_key(|e| dist((e.to_x, e.to_y), near));
-                if let Some(e) = closest {
-                    route = vec![e];
-                }
+            if let (1, Some(near)) = (route.len(), near)
+                && let Some(e) = self.door_into(&here, target, near, &skip).await?
+            {
+                route = vec![e];
             }
             let Some(edge) = route.first() else { return Ok(Outcome::Done) };
             tracing::info!(from = %here, to = %edge.to, legs_left = route.len(), "travel");
@@ -172,13 +275,16 @@ impl Bot {
     /// and flees from the rest: walking on to the warp leaves the monster behind.
     async fn take_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
         let from = obs.map.name.clone();
+        // A warp inside the map lands on another part of it, not another map
+        let (inner, start_region) = (edge.to == from, obs.me.region);
+        let crossed = |obs: &Observation| obs.map.name != from || inner && obs.me.region != start_region;
         let (mut tries, mut attacked_walks, mut fights) = (0, 0, 0);
         while tries < WARP_TRIES && attacked_walks < ATTACKED_WALKS {
             let obs = self.observe().await?;
             if obs.me.dead {
                 return Ok(Outcome::failed("dead"));
             }
-            if obs.map.name != from {
+            if crossed(&obs) {
                 return Ok(Outcome::Done);
             }
             let action = match matching_warp(&obs, edge) {
@@ -197,6 +303,7 @@ impl Bot {
             }
             match ended {
                 Walk::MapChanged => return Ok(Outcome::Done),
+                Walk::Preempted => return Ok(Outcome::Preempted),
                 Walk::Dead { attacker } => return Ok(self.died_on_the_way(&from, attacker)),
                 Walk::FightBack { target, name } => {
                     fights += 1;
@@ -220,7 +327,7 @@ impl Bot {
             }
         }
         let obs = self.observe().await?;
-        if obs.map.name != from {
+        if crossed(&obs) {
             return Ok(Outcome::Done);
         }
         // Every walk ended without a warp and nothing got in the way: there is no usable warp there (a guessed way
@@ -263,6 +370,12 @@ impl Bot {
             }
             if obs.map.name != from {
                 return Ok((Walk::MapChanged, hit));
+            }
+            // A long walk across a map would keep the bot deaf for a minute; under attack, it walks on
+            if self.preempted() && !hit {
+                walk.abort();
+                self.act(Action::Stop).await.ok();
+                return Ok((Walk::Preempted, hit));
             }
             if obs.me.hp >= last_hp {
                 last_hp = obs.me.hp;
@@ -352,6 +465,7 @@ impl Bot {
             goal: "Leave the training grounds and go straight to a town of Ragnarok Online".into(),
             keywords: vec!["direct access".into(), "ragnarok online".into()],
             text_answer: Some(self.name.clone()),
+            ..Default::default()
         };
         let end = self.run_dialog(dialog_of(&result), &intent).await?;
         // The warp lands a moment after the dialogue closes.
@@ -375,5 +489,20 @@ impl Bot {
             self.act(Action::DialogClose).await.ok();
         }
         Ok(Outcome::Done)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_door;
+
+    #[test]
+    fn the_first_door_leads_on_the_shortest_way_between_rooms() {
+        // 1 -> 2 at (10, 10), 2 -> 3 at (20, 20), 1 -> 4 at (30, 30), 4 -> 5 at (40, 40), 2 -> 1 at (11, 11).
+        let doors = [(1, (10, 10), 2), (2, (20, 20), 3), (1, (30, 30), 4), (4, (40, 40), 5), (2, (11, 11), 1)];
+        assert_eq!(first_door(&doors, 1, 3), Some((10, 10)));
+        assert_eq!(first_door(&doors, 1, 5), Some((30, 30)));
+        assert_eq!(first_door(&doors, 3, 1), None);
+        assert_eq!(first_door(&doors, 2, 4), Some((11, 11)));
     }
 }

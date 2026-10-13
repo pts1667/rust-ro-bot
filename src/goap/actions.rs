@@ -21,6 +21,12 @@ pub enum Step {
     LearnSkills,
     /// Talk to the Job Master.
     ChangeJob { job: String },
+    /// Buy a piece of equipment at a shop of this map and wear it.
+    BuyGear { item: u32, map: String },
+    /// Buy items at a shop of this map until the bot has `amount`.
+    BuyItem { item: u32, amount: u32, map: String },
+    /// Do the current stage of a quest, on this map.
+    Quest { id: String, map: String },
 }
 
 /// Where the plan's shop and Job Master are, and how far maps are, as known when planning.
@@ -51,6 +57,7 @@ impl Step {
             Step::SellLoot | Step::BuyPotions => 1,
             Step::RaiseStats | Step::LearnSkills => 1,
             Step::ChangeJob { .. } => 2,
+            Step::BuyGear { .. } | Step::BuyItem { .. } | Step::Quest { .. } => 1,
         }
     }
 
@@ -62,10 +69,11 @@ impl Step {
             Step::Hunt { map } => &ws.map == map && ws.hp_ok,
             Step::WalkToShop => ctx.shop_map.as_deref() == Some(ws.map.as_str()) && !ws.near_shop,
             Step::SellLoot => ws.near_shop && ws.loot_to_sell,
-            Step::BuyPotions => ws.near_shop && ws.can_afford_potions && !ws.has_potions,
+            Step::BuyPotions => ws.near_shop && ws.can_afford_potions && (!ws.has_potions || ws.ammo_low),
             Step::RaiseStats => ws.status_points,
             Step::LearnSkills => ws.skill_points,
             Step::ChangeJob { .. } => ctx.job_map.as_deref() == Some(ws.map.as_str()) && ws.job_change_ready,
+            Step::BuyGear { map, .. } | Step::BuyItem { map, .. } | Step::Quest { map, .. } => &ws.map == map,
         }
     }
 
@@ -93,12 +101,25 @@ impl Step {
                 next.loot_to_sell = false;
                 next.can_afford_potions = true;
             }
-            Step::BuyPotions => next.has_potions = true,
+            Step::BuyPotions => {
+                next.has_potions = true;
+                next.ammo_low = false;
+            }
             Step::RaiseStats => next.status_points = false,
             Step::LearnSkills => next.skill_points = false,
             Step::ChangeJob { job } => {
                 next.job = job.clone();
                 next.job_change_ready = false;
+            }
+            Step::BuyGear { item, .. } => {
+                next.items.entry(*item).or_insert(1);
+            }
+            Step::BuyItem { item, amount, .. } => {
+                let have = next.items.entry(*item).or_default();
+                *have = (*have).max(*amount);
+            }
+            Step::Quest { id, .. } => {
+                *next.quest_stages.entry(id.clone()).or_default() += 1;
             }
         }
         next

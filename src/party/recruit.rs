@@ -20,6 +20,8 @@ use crate::bot::Bot;
 pub const MAX_MEMBERS: usize = 4;
 /// Most levels apart for a bot to party up with someone: under the 15 of shared experience, with room to level.
 const LEVEL_GAP: u32 = 10;
+/// How long a level someone gave is taken as theirs.
+const LEVEL_HEARD_FOR: Duration = Duration::from_secs(30 * 60);
 /// A member leaves once the leader is this many levels away: experience is no longer shared.
 const LEAVE_LEVEL_GAP: u32 = 15;
 const SEARCH_EVERY: Duration = Duration::from_secs(45);
@@ -35,6 +37,8 @@ const REGISTER_EVERY: Duration = Duration::from_secs(60);
 const LEADER_GONE: Duration = Duration::from_secs(600);
 const BASIC_SKILL_TO_CREATE: u32 = 7;
 const PARTY_NAME_LEN: usize = 23;
+/// A bot nobody answers says it looks for a party or members this often, when someone is in sight to hear it.
+const SHOUT_EVERY: Duration = Duration::from_secs(180);
 
 /// What a bot finding a party remembers.
 #[derive(Debug, Default)]
@@ -49,6 +53,12 @@ pub struct Recruiting {
     last_create: Option<Instant>,
     create_tries: u32,
     leader_gone_since: Option<Instant>,
+    last_shout: Option<Instant>,
+    /// Since when the bot leads a party of one.
+    alone_since: Option<Instant>,
+    /// Base levels others gave of themselves (a booking ad, "party? level 12/9 Swordman"), by lowercase name. A game
+    /// client shows levels only for party members, so these are all the bot knows of a stranger's.
+    heard_levels: HashMap<String, (u32, Instant)>,
 }
 
 impl Recruiting {
@@ -60,8 +70,14 @@ impl Recruiting {
         map.get(&name.to_lowercase()).is_some_and(|at| at.elapsed() < within)
     }
 
+    /// Someone said they would invite the bot: their invitation is taken.
+    pub fn expect_invitation(&mut self, name: &str) {
+        self.asked.insert(name.to_lowercase(), Instant::now());
+        self.refused.remove(&name.to_lowercase());
+    }
+
     /// Whether the bot asked `name` to join a while ago and waits for its invitation.
-    fn waits_for(&self, name: &str) -> bool {
+    pub fn waits_for(&self, name: &str) -> bool {
         Self::recently(&self.asked, name, ASK_AGAIN) && !Self::recently(&self.refused, name, ASK_AGAIN)
     }
 
@@ -91,17 +107,47 @@ impl Recruiting {
             .collect()
     }
 
-    /// Whether to take a party invitation, outside a party: from someone the bot asked, or from someone in sight
-    /// close enough in level.
+    /// Players in sight outside the party who said in public they look for one ("lf party, level 12/9 Swordman"),
+    /// in the messages after `last`.
+    fn shouts(&self, obs: &Observation, last: u64) -> Vec<chat::Line> {
+        obs.messages
+            .iter()
+            .filter(|m| m.seq > last && m.channel == "chat")
+            .filter_map(|m| chat::parse(&m.text))
+            .filter(|line| matches!(line.said, Said::WantParty { .. }) && obs.player_near(&line.from, SIGHT).is_some_and(|p| !p.party))
+            .filter(|line| !line.from.eq_ignore_ascii_case(&obs.me.name))
+            .collect()
+    }
+
+    /// Whether to say aloud that the bot looks for a party: someone outside it is in sight, and it was not said lately.
+    fn may_shout(&self, obs: &Observation) -> bool {
+        obs.players.iter().any(|p| !p.party) && self.last_shout.is_none_or(|at| at.elapsed() >= SHOUT_EVERY)
+    }
+
+    /// Whether to take a party invitation, outside a party: from someone the bot asked, or from someone in sight who
+    /// said a level close enough to the bot's.
     pub fn takes(&self, obs: &Observation, invitation: &PartyInvitation) -> bool {
         let inviter = &invitation.inviter_name;
         self.waits_for(inviter)
-            || obs.player_near(inviter, SIGHT).is_some_and(|p| p.base_level.abs_diff(obs.me.base_level) <= LEVEL_GAP)
+            || obs.player_near(inviter, SIGHT).is_some()
+                && self.heard_level(inviter).is_some_and(|level| level.abs_diff(obs.me.base_level) <= LEVEL_GAP)
+    }
+
+    /// Notes the base level someone gave of themselves.
+    pub fn hear_level(&mut self, name: &str, level: u32) {
+        if level > 0 {
+            self.heard_levels.insert(name.to_lowercase(), (level, Instant::now()));
+        }
+    }
+
+    /// The level `name` gave lately, if any.
+    fn heard_level(&self, name: &str) -> Option<u32> {
+        self.heard_levels.get(&name.to_lowercase()).filter(|(_, at)| at.elapsed() < LEVEL_HEARD_FOR).map(|(level, _)| *level)
     }
 }
 
 /// The name of the party a bot creates, another one after a refused try (the name may be taken).
-fn party_name(me: &str, tries: u32) -> String {
+pub(crate) fn party_name(me: &str, tries: u32) -> String {
     let name = if tries == 0 { format!("{me}'s party") } else { format!("{me}'s party {tries}") };
     name.chars().take(PARTY_NAME_LEN).collect()
 }
@@ -113,7 +159,19 @@ impl Bot {
 
     /// Finding a party, or members for the bot's own. Returns whether it acted.
     pub(super) async fn recruit(&mut self, obs: &Observation) -> Result<bool> {
+        let last = self.recruiting().last_whisper_seq;
+        let shouts = self.recruiting().shouts(obs, last);
         let whispers = self.recruiting().whispers(obs);
+        for line in shouts.iter().chain(&whispers) {
+            if let Said::WantParty { base, .. } = line.said {
+                self.recruiting().hear_level(&line.from, base);
+            }
+        }
+        if let Some(results) = &obs.booking_results {
+            for ad in &results.ads {
+                self.recruiting().hear_level(&ad.name, ad.level.max(0) as u32);
+            }
+        }
         for line in &whispers {
             if let Said::Sorry(reason) = &line.said {
                 tracing::info!(from = %line.from, %reason, "not taken in the party");
@@ -123,7 +181,7 @@ impl Bot {
         match &obs.party {
             None => self.look_for_party(obs).await,
             Some(party) if leader_of(party).is_some_and(|l| l.name.eq_ignore_ascii_case(&obs.me.name)) => {
-                self.gather_members(obs, party, &whispers).await
+                self.gather_members(obs, party, &whispers, &shouts).await
             }
             Some(party) => self.stay_or_leave(obs, party).await,
         }
@@ -156,6 +214,14 @@ impl Bot {
             self.act(Action::BookingSearch).await.ok();
             return Ok(true);
         }
+        // Nobody to join and no party of its own possible yet: say so to whoever is around
+        if searched.is_some_and(|since| since >= RESULTS_WAIT) && obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE && r.may_shout(obs) {
+            r.last_shout = Some(Instant::now());
+            let text = format!("lf party, level {}/{} {}", obs.me.base_level, obs.me.job_level, obs.me.job);
+            tracing::info!(%text, "looking for a party aloud");
+            self.act(Action::Say { text }).await.ok();
+            return Ok(true);
+        }
         // Nobody to join: start a party, when the bot can
         if searched.is_some_and(|since| since >= RESULTS_WAIT)
             && obs.skill_level("NV_BASIC") >= BASIC_SKILL_TO_CREATE
@@ -171,8 +237,19 @@ impl Bot {
         Ok(false)
     }
 
-    async fn gather_members(&mut self, obs: &Observation, party: &Party, whispers: &[chat::Line]) -> Result<bool> {
+    async fn gather_members(&mut self, obs: &Observation, party: &Party, whispers: &[chat::Line], shouts: &[chat::Line]) -> Result<bool> {
         let full = party.members.len() >= MAX_MEMBERS;
+        // Someone in sight looking for a party, close in level: invited without a word
+        for line in shouts {
+            let Said::WantParty { base, .. } = &line.said else { continue };
+            let member = party.members.iter().any(|m| m.name.eq_ignore_ascii_case(&line.from));
+            if full || member || (*base > 0 && base.abs_diff(obs.me.base_level) > LEVEL_GAP) {
+                continue;
+            }
+            tracing::info!(from = %line.from, level = base, "invited someone looking for a party");
+            self.act(Action::PartyInvite { name: line.from.clone() }).await.ok();
+            return Ok(true);
+        }
         for line in whispers {
             let Said::WantParty { base, .. } = &line.said else { continue };
             if party.members.iter().any(|m| m.name.eq_ignore_ascii_case(&line.from)) {
@@ -192,6 +269,20 @@ impl Bot {
             tracing::info!(from = %line.from, level = base, invited = refusal.is_none(), "asked to join the party");
             self.act(action).await.ok();
             return Ok(true);
+        }
+        let r = self.recruiting();
+        if party.members.len() == 1 {
+            let alone = *r.alone_since.get_or_insert_with(Instant::now);
+            // Nobody came for a while: tell whoever is around
+            if alone.elapsed() >= SHOUT_EVERY && r.may_shout(obs) {
+                r.last_shout = Some(Instant::now());
+                let text = format!("lf members, level {}/{} {}, whisper me", obs.me.base_level, obs.me.job_level, obs.me.job);
+                tracing::info!(%text, "looking for members aloud");
+                self.act(Action::Say { text }).await.ok();
+                return Ok(true);
+            }
+        } else {
+            r.alone_since = None;
         }
         // Alone with an ad: join an older party that fits rather than wait
         if party.members.len() == 1 {
@@ -297,9 +388,12 @@ mod tests {
         assert!(r.takes(&obs, &invitation("Alfa")));
         r.refused.insert("alfa".into(), Instant::now());
         assert!(!r.takes(&obs, &invitation("Alfa")));
+        // A stranger in sight: their level is not shown, only what they said of it counts
         obs.players = vec![Player { id: 3, name: "Gus".into(), base_level: 18, ..Default::default() }];
+        assert!(!r.takes(&obs, &invitation("Gus")));
+        r.hear_level("Gus", 18);
         assert!(r.takes(&obs, &invitation("Gus")));
-        obs.players[0].base_level = 40;
+        r.hear_level("Gus", 40);
         assert!(!r.takes(&obs, &invitation("Gus")));
     }
 

@@ -144,6 +144,9 @@ pub struct RunArgs {
     /// The bot's part in the party; healer and tank also set the job it heads for.
     #[arg(long, value_enum, default_value_t = crate::party::Role::Fighter)]
     pub role: crate::party::Role,
+    /// The job to head for, a first or a second job (`Hunter` goes through Archer); it also sets the stat build.
+    #[arg(long)]
+    pub job: Option<String>,
 }
 
 impl Endpoints {

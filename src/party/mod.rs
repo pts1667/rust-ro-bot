@@ -221,6 +221,12 @@ impl PartyPlay {
         self.potion_requests.retain(|_, at| at.elapsed() < POTION_REQUEST_LASTS);
     }
 
+    /// Follows `name` rather than the leader, as when it said "follow me".
+    pub fn follow_member(&mut self, name: &str) {
+        self.follow = Some(name.to_owned());
+        self.staying = false;
+    }
+
     pub fn wants_heal(&self, name: &str) -> bool {
         self.heal_requests.keys().any(|n| n.eq_ignore_ascii_case(name))
     }
@@ -334,7 +340,9 @@ impl Bot {
 
         if let Some(invitation) = &obs.party_invitation {
             let accept = obs.party.is_none()
-                && (config.is_friend(&invitation.inviter_name) || (config.auto && play.recruiting.takes(obs, invitation)));
+                && (config.is_friend(&invitation.inviter_name)
+                    || (config.auto && play.recruiting.takes(obs, invitation))
+                    || play.recruiting.waits_for(&invitation.inviter_name));
             tracing::info!(from = %invitation.inviter_name, accept, "party invitation");
             self.act(if accept { Action::PartyAccept } else { Action::PartyDecline }).await.ok();
             return Ok(true);
@@ -506,7 +514,7 @@ impl Bot {
     }
 
     /// Walks to a cell next to `there` (or onto it).
-    async fn walk_next_to(&mut self, obs: &Observation, there: (u16, u16)) -> Result<Outcome> {
+    pub(crate) async fn walk_next_to(&mut self, obs: &Observation, there: (u16, u16)) -> Result<Outcome> {
         if obs.near_warp(there, 1) {
             // A member just arrived through a warp, or stands at one: it moves on soon, wait for it here.
             Bot::pause(800).await;

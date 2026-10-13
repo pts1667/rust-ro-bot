@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use super::combat::{Fighter, SAFE_DANGER};
-use super::db::{Db, MapData, MobData};
+use super::db::{Db, ItemData, MapData, MobData};
 use super::graph::WorldGraph;
 
 #[derive(Debug, Clone)]
@@ -92,6 +92,63 @@ pub async fn lethal_monster(db: &Db, map: &str, fighter: &Fighter) -> Option<Str
         }
     }
     None
+}
+
+/// Where to hunt for an item: the map within `max_hops` warps where the bot can safely fight what drops it,
+/// ranked by drop chance, spawns and distance. The ground and the monster.
+pub async fn farm_ground(
+    db: &Db,
+    graph: &WorldGraph,
+    fighter: &Fighter,
+    from: &str,
+    item: &ItemData,
+    max_hops: u32,
+    avoid_maps: &HashSet<String>,
+    avoid_mobs: &HashSet<String>,
+) -> Result<Option<(Ground, String)>> {
+    let mut droppers: Vec<_> = item.dropped_by.iter().filter(|d| !d.mvp && d.rate > 0).collect();
+    droppers.sort_by_key(|d| std::cmp::Reverse(d.rate));
+    droppers.truncate(8);
+    let mut best: Option<(f32, Ground, String)> = None;
+    for drop in droppers {
+        let Some(id) = drop.mob.id_u32() else { continue };
+        let Ok(mob) = db.mob(id).await else { continue };
+        for spawn in mob.spawns.iter().filter(|s| s.kind != "boss" && s.amount > 0) {
+            let name = spawn.map.id_str();
+            if avoid_maps.contains(&name) || !is_hunting_map_name(&name) {
+                continue;
+            }
+            let hops = if name == from {
+                0
+            } else {
+                match graph.route(from, &name, avoid_maps).await? {
+                    Some(route) => route.len() as u32,
+                    None => continue,
+                }
+            };
+            if hops > max_hops {
+                continue;
+            }
+            let Ok(map) = db.map(&name).await else { continue };
+            let mut mobs = Vec::new();
+            for s in &map.mob_spawns {
+                if let Some(id) = s.mob.id_u32()
+                    && let Ok(m) = db.mob(id).await
+                {
+                    mobs.push(m);
+                }
+            }
+            let Some(ground) = score_map(&map, &mobs, fighter, hops, avoid_mobs) else { continue };
+            if !ground.targets.iter().any(|(n, _, _)| *n == mob.name_english) {
+                continue;
+            }
+            let value = drop.rate as f32 * spawn.amount as f32 / (1.0 + 0.3 * hops as f32);
+            if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
+                best = Some((value, ground, mob.name_english.clone()));
+            }
+        }
+    }
+    Ok(best.map(|(_, g, m)| (g, m)))
 }
 
 /// The best grounds within `max_hops` warps of `from`.

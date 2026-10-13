@@ -23,7 +23,7 @@ const BUFF_EVERY: Duration = Duration::from_secs(60);
 /// Buffs only while this share of SP is left, Heal comes first.
 const BUFF_SP_SHARE: f32 = 0.5;
 /// Healing items a bot keeps for itself: it gives only what it has over this.
-const SPARE_ABOVE: u32 = 8;
+pub(crate) const SPARE_ABOVE: u32 = 8;
 const GIVE_AT_MOST: u32 = 5;
 /// An open trade window is cancelled after this long.
 const TRADE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -142,7 +142,11 @@ impl Bot {
             None
         };
         let Some(action) = action else { return Ok(false) };
-        self.act(action).await.ok();
+        let gift = matches!(action, Action::TradeConfirm) && !trade.partner_items.is_empty();
+        let partner = trade.partner_name.clone();
+        if self.act(action).await.is_ok() && gift {
+            self.say_to_party(Said::Other(format!("thanks, {partner}!"))).await;
+        }
         Ok(true)
     }
 
@@ -173,7 +177,7 @@ impl Bot {
     }
 
     /// Walks next to the member and trades it some healing items.
-    async fn give_potions(&mut self, to: u64, name: &str) -> Result<Outcome> {
+    pub(crate) async fn give_potions(&mut self, to: u64, name: &str) -> Result<Outcome> {
         let obs = self.observe().await?;
         let Some(potion) = obs
             .inventory

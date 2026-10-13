@@ -42,13 +42,19 @@ const OPENERS: [(&str, u32); 8] = [
     ("TF_POISON", 12),
 ];
 
+/// Whether the job's attack is its spells: a Mage's staff hits for little.
+fn casts_to_fight(job: &str) -> bool {
+    matches!(crate::knowledge::gear::normal_job(job).as_str(), "mage" | "wizard" | "sage")
+}
+
 impl Bot {
     /// Picks the best monster to fight on this map, if any; within `area` (a cell and a radius) when given. Monsters
     /// another player fights are theirs; those that attack a party member come first.
     pub async fn pick_target(&mut self, obs: &Observation, area: Option<((u16, u16), u32)>) -> Result<Option<(u64, String)>> {
         let fighter = self.knowledge.fighter(obs).await?;
         let me = obs.pos();
-        let avoid: Vec<String> = self.memory.strategy.avoid_mobs.iter().map(|s| s.to_lowercase()).collect();
+        let avoid: Vec<String> =
+            self.memory.strategy.avoid_mobs.iter().chain(&self.memory.losing_to(obs.me.base_level)).map(|s| s.to_lowercase()).collect();
         let members = member_ids(obs);
         let mut best: Option<(f32, u64, String)> = None;
         let mobs = obs.mobs.clone();
@@ -154,6 +160,8 @@ impl Bot {
             return Ok(Outcome::failed(format!("cannot attack {name}: {error}")));
         }
         let mut opened = false;
+        // A caster's bolts are its attack, not just an opener: cast whenever the last cast is over and SP allows
+        let caster = casts_to_fight(&self.observe().await?.me.job);
         let mut last_pos = None;
         let mut last_hp = None;
         let mut stalled_since = Instant::now();
@@ -162,18 +170,28 @@ impl Bot {
             let obs = self.observe().await?;
             if obs.me.dead {
                 *self.memory.deaths_by_cause.entry(name.to_owned()).or_default() += 1;
+                self.memory.record_fight(name, obs.me.base_level, false);
+                if self.memory.losing_to(obs.me.base_level).iter().any(|m| m == name) {
+                    self.memory.note(format!("{name} keeps killing me: leaving it alone for a few levels"));
+                }
                 self.memory.note(format!("died fighting {name} on {}", obs.map.name));
                 return Ok(Outcome::failed(format!("died fighting {name}")));
             }
             let Some(mob) = obs.mobs.iter().find(|m| m.id == target) else {
                 self.memory.counters.kills += 1;
                 *self.memory.kills_by_mob.entry(name.to_owned()).or_default() += 1;
+                self.memory.record_fight(name, obs.me.base_level, true);
                 let pos = last_pos.unwrap_or(obs.pos());
                 Bot::pause(500).await;
                 self.loot_near(pos, LOOT_RADIUS).await?;
                 return Ok(Outcome::Done);
             };
             last_pos = Some((mob.x, mob.y));
+            // A new goal, or someone talking to the bot, while it walks to a monster that is not fighting yet: that first
+            if self.preempted() && mob.target != Some(obs.me.char_id) && dist(obs.pos(), (mob.x, mob.y)) > 3 {
+                self.act(Action::Stop).await.ok();
+                return Ok(Outcome::Preempted);
+            }
             if last_hp != Some(mob.hp) {
                 last_hp = Some(mob.hp);
                 stalled_since = Instant::now();
@@ -185,7 +203,7 @@ impl Bot {
                 self.act(Action::Attack { target, wait: false }).await.ok();
                 continue;
             }
-            if !opened && dist(obs.pos(), (mob.x, mob.y)) <= 9 {
+            if (!opened || caster && obs.me.action != "using_skill") && dist(obs.pos(), (mob.x, mob.y)) <= 9 {
                 opened = true;
                 if let Some((skill, _)) = OPENERS.iter().find(|(s, sp)| obs.skill_level(s) > 0 && obs.me.sp >= *sp) {
                     self.act(Action::Skill { skill: (*skill).to_owned(), target: Some(target) }).await.ok();
@@ -235,11 +253,20 @@ impl Bot {
         Ok(())
     }
 
-    /// Stands still until HP is back. Fights back when something attacks meanwhile.
+    /// Sits until HP is back (sitting doubles regeneration). Fights back when something attacks meanwhile.
     pub async fn rest(&mut self) -> Result<Outcome> {
         self.act(Action::Stop).await.ok();
+        self.act(Action::Sit).await.ok();
+        let outcome = self.sit_out().await;
+        self.act(Action::Stand).await.ok();
+        outcome
+    }
+
+    async fn sit_out(&mut self) -> Result<Outcome> {
         let start = Instant::now();
-        let mut last_hp = self.observe().await?.me.hp;
+        let first = self.observe().await?;
+        let mut last_hp = first.me.hp;
+        let from = first.me.hp_frac();
         while start.elapsed() < REST_TIMEOUT {
             Bot::pause(2000).await;
             let obs = self.observe().await?;
@@ -249,17 +276,15 @@ impl Bot {
             if obs.me.hp_frac() >= HP_FULL {
                 return Ok(Outcome::Done);
             }
-            // Natural regeneration is slow: heal with skills (SP comes back by itself), and with items when HP is low.
-            if let Some(heal) = self.knowledge.heal_action(&obs)
-                && (heal.skill || obs.me.hp_frac() < HP_LOW)
-            {
-                self.act(heal.action).await.ok();
-            }
             if obs.me.hp < last_hp {
-                // Something hits the bot: fight back against the nearest monster.
+                // Something hits the bot: fight back against what attacks it, else the nearest monster.
                 let me = obs.pos();
-                if let Some(m) = obs.mobs.iter().filter(|m| dist((m.x, m.y), me) <= 3).min_by_key(|m| dist((m.x, m.y), me)) {
+                let attacker = obs.mobs.iter().find(|m| m.target == Some(obs.me.char_id)).or_else(|| {
+                    obs.mobs.iter().filter(|m| dist((m.x, m.y), me) <= 3).min_by_key(|m| dist((m.x, m.y), me))
+                });
+                if let Some(m) = attacker {
                     let (id, name) = (m.id, m.name.clone());
+                    self.act(Action::Stand).await.ok();
                     if obs.me.hp_frac() < HP_POTION
                         && let Some(heal) = self.knowledge.heal_action(&obs)
                     {
@@ -270,9 +295,21 @@ impl Bot {
                 }
             }
             last_hp = obs.me.hp;
+            // Natural regeneration is slow: heal with skills (SP comes back by itself), and with items when HP is low.
+            // Neither works sitting down.
+            if let Some(heal) = self.knowledge.heal_action(&obs)
+                && (heal.skill || obs.me.hp_frac() < HP_LOW)
+            {
+                self.act(Action::Stand).await.ok();
+                self.act(heal.action).await.ok();
+                Bot::pause(500).await;
+                self.act(Action::Sit).await.ok();
+                last_hp = self.observe().await?.me.hp;
+            }
         }
-        // Slow regeneration: enough HP to fight again is enough to go on.
-        if self.observe().await?.me.hp_frac() >= HP_LOW {
+        // Slow regeneration: enough HP to fight again is enough to go on, and so is HP that came back some way.
+        let hp = self.observe().await?.me.hp_frac();
+        if hp >= HP_LOW || hp >= from + 0.2 {
             return Ok(Outcome::Done);
         }
         Ok(Outcome::failed("HP did not come back in time"))

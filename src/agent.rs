@@ -9,10 +9,10 @@ use anyhow::Result;
 use crate::api::{Action, ApiError, Observation};
 use crate::bot::{Bot, Outcome};
 use crate::config::RunArgs;
-use crate::goap::state::{Extra, is_loot};
+use crate::goap::state::{Extra, is_loot_item};
 use crate::goap::{Goal, PlanContext, Step, WorldState, plan};
 use crate::memory::Counters;
-use crate::party::chat::Said;
+use crate::social::help::HelpOutcome;
 use crate::strategist::options::JOB_MAP;
 use crate::strategist::{Event, Handle, Snapshot};
 
@@ -23,7 +23,6 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(300);
 /// Failed steps in a row before the goal is given up.
 const MAX_STEP_FAILURES: u32 = 3;
 const SAVE_EVERY: Duration = Duration::from_secs(30);
-const CHAT_COOLDOWN: Duration = Duration::from_secs(20);
 
 /// Carrying capacity in the observation's weight unit (tenths), pre-renewal: job base + 300 per STR.
 pub fn max_weight(job: &str, str: u32) -> u32 {
@@ -58,9 +57,11 @@ struct Run {
     start_job_level: u32,
     prev: Option<Observation>,
     last_save: Instant,
-    last_chat_seq: u64,
-    last_reply: Option<Instant>,
     llm_base: Counters,
+    /// The last favour that ended: a decision made before it ended may still name it.
+    ended_favour: Option<Goal>,
+    /// The `ask:<id>` option of the request taken up last.
+    taken_ask: String,
 }
 
 pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> {
@@ -86,14 +87,16 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
         errors_in_row: 0,
         start_level: first.me.base_level,
         start_job_level: first.me.job_level,
-        last_chat_seq: first.last_message_seq(),
         prev: None,
         last_save: Instant::now(),
-        last_reply: None,
+        ended_favour: None,
+        taken_ask: String::new(),
         llm_base: bot.memory.counters.clone(),
     };
     let started = Instant::now();
     bot.memory.visited_maps.insert(first.map.name.clone());
+    bot.social.start(&first);
+    bot.talk_seq.store(first.last_message_seq(), std::sync::atomic::Ordering::SeqCst);
 
     let result = loop {
         if stop.load(Ordering::SeqCst) {
@@ -194,11 +197,22 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
     {
         bot.act(heal.action).await.ok();
     }
-    reply_to_chat(bot, r, &obs).await;
+    if bot.gear_reflexes(&obs).await? {
+        return Ok(());
+    }
+    let doing = r.goal.as_ref().map(|g| g.label()).unwrap_or_else(|| "looking around".into());
+    if bot.converse(&obs, &doing).await {
+        // The strategist decides with the request in its snapshot
+        let ws = world_state(bot, &obs);
+        publish(bot, handle, r, &obs, &ws);
+        handle.events.send(Event::Asked).ok();
+    }
+    bot.decline_stale(&obs, r.goal.as_ref()).await;
     if bot.party_reflexes(&obs, r.goal.as_ref()).await? {
         return Ok(());
     }
 
+    bot.keep = crate::quests::kept_items(&bot.memory.quests);
     let mut ws = world_state(bot, &obs);
     if ws.status_points {
         let outcome = bot.raise_stats().await?;
@@ -223,7 +237,23 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         bot.memory.counters.llm_calls = r.llm_base.llm_calls + llm.llm_calls;
         bot.memory.counters.llm_invalid = r.llm_base.llm_invalid + llm.llm_invalid;
         bot.memory.counters.llm_prompt_chars = r.llm_base.llm_prompt_chars + llm.llm_prompt_chars;
-        if r.goal.as_ref() != Some(&d.goal) {
+        bot.answer_requests(&obs, &d.asked, &d.option, Some(&d.goal), &d.refusals).await;
+        // The same favour asked again is a new one; a later directive for the same request is not
+        if d.option.starts_with("ask:") && d.option != r.taken_ask {
+            r.ended_favour = None;
+            r.taken_ask = d.option.clone();
+        }
+        // A quest is taken up with its first goal, even one that only buys or hunts what it asks for: the book holds
+        // its stage, and without an entry the goal of a later stage reads as done before it starts
+        if let Some(id) = d.option.strip_prefix("quest:")
+            && !bot.memory.quests.contains_key(id)
+        {
+            bot.memory.quests.insert(id.to_owned(), Default::default());
+            bot.keep = crate::quests::kept_items(&bot.memory.quests);
+        }
+        if r.ended_favour.as_ref() == Some(&d.goal) {
+            tracing::debug!(goal = %d.goal.label(), "a favour that is over, not taken up again");
+        } else if r.goal.as_ref() != Some(&d.goal) {
             tracing::info!(goal = %d.goal.label(), reason = %d.reason, by_llm = d.by_llm, "new goal");
             r.goal = Some(d.goal);
             r.goal_since = Instant::now();
@@ -231,6 +261,31 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         }
     }
     publish(bot, handle, r, &obs, &ws);
+    // A favour asked in chat runs by itself, not planned.
+    if let Some(ref goal @ Goal::Help { ref who, task }) = r.goal.clone() {
+        let event = match bot.help(&obs, who, task, r.goal_since).await? {
+            HelpOutcome::Going => return Ok(()),
+            HelpOutcome::Finished => {
+                tracing::info!(goal = %goal.label(), "favour done");
+                r.last_outcome = format!("{} done", goal.label());
+                Event::GoalDone(goal.label())
+            }
+            HelpOutcome::Failed(reason) => {
+                tracing::info!(goal = %goal.label(), %reason, "favour given up");
+                bot.memory.note(format!("could not {}: {reason}", goal.label()));
+                r.last_outcome = format!("{} failed: {reason}", goal.label());
+                Event::GoalFailed(format!("{}: {reason}", goal.label()))
+            }
+        };
+        // The strategist must not see the favour as current any more, or it keeps it
+        r.goal = None;
+        r.ended_favour = Some(goal.clone());
+        let obs = bot.observe().await?;
+        let ws = world_state(bot, &obs);
+        publish(bot, handle, r, &obs, &ws);
+        handle.events.send(event).ok();
+        return Ok(());
+    }
     // In a party, following the leader replaces the hunt; errands still run as planned.
     if let Some(outcome) = bot.party_step(&obs, r.goal.as_ref()).await? {
         r.last_outcome = match outcome {
@@ -257,6 +312,7 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         bot.memory.potion_shop.as_ref().map(|s| s.map.clone())
     };
     let ctx = PlanContext { shop_map, job_map: Some(JOB_MAP.to_owned()), hops: Vec::new() };
+    bot.travel_spot = goal.spot();
     ws.hunted = false;
     let Some(steps) = plan(&ws, &goal, &ctx) else {
         give_up(bot, handle, r, &goal, "no plan reaches it");
@@ -319,6 +375,8 @@ fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
         near_shop: bot.near_shop,
         potion_price: bot.memory.potion_shop.as_ref().map(|s| s.price).unwrap_or(50),
         heal_hp: bot.knowledge.heal_stock(obs),
+        keep: bot.keep.clone(),
+        quest_stages: crate::quests::stages(&bot.memory.quests, obs),
     };
     let mut ws = WorldState::from_observation(obs, &extra);
     if bot.stats_stuck_at == Some(obs.me.status_points) {
@@ -346,7 +404,7 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
         weight_frac: obs.me.weight as f32 / max_weight(&obs.me.job, obs.me.stats.str) as f32,
         heal_hp: bot.knowledge.heal_stock(obs),
         heal_items: bot.knowledge.heal_items(obs),
-        loot_items: obs.inventory.iter().filter(|i| is_loot(&i.kind, i.equipped)).map(|i| i.amount).sum(),
+        loot_items: obs.inventory.iter().filter(|i| is_loot_item(i, &bot.keep)).map(|i| i.amount).sum(),
         potion_price: bot.memory.potion_shop.as_ref().map(|s| s.price).unwrap_or(0),
         kills: bot.memory.counters.kills,
         deaths: bot.memory.counters.deaths,
@@ -355,37 +413,14 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
         journal: bot.memory.journal.clone(),
         visited: bot.memory.visited_maps.iter().cloned().collect(),
         recent_failures: r.failures.iter().map(|(g, _)| g.clone()).collect(),
+        bad_shops: bot.memory.bad_shops.clone(),
+        losing_to: bot.memory.losing_to(obs.me.base_level),
+        quests: bot.memory.quests.clone(),
+        requests: bot.social.pending.clone(),
+        party_play: bot.party.is_some(),
+        friends: bot.party.as_ref().map(|p| p.config.friends.clone()).unwrap_or_default(),
     };
     handle.snapshots.send_replace(Some(snap));
-}
-
-/// Answers what other players say around the bot, through the LLM helper, now and then.
-async fn reply_to_chat(bot: &mut Bot, r: &mut Run, obs: &Observation) {
-    let new: Vec<_> = obs.messages.iter().filter(|m| m.seq > r.last_chat_seq).cloned().collect();
-    r.last_chat_seq = r.last_chat_seq.max(obs.last_message_seq());
-    let Some(helper) = bot.helper.clone() else { return };
-    if r.last_reply.is_some_and(|t| t.elapsed() < CHAT_COOLDOWN) {
-        return;
-    }
-    let me = obs.me.name.clone();
-    let Some((from, text)) = new.iter().filter(|m| m.channel == "chat" || m.channel == "whisper").find_map(|m| {
-        let (from, text) = m.text.split_once(" : ")?;
-        // Asking to join a party, and the answer, are the party's business
-        let party_talk = matches!(crate::party::chat::parse(&m.text).map(|l| l.said), Some(Said::WantParty { .. } | Said::Sorry(_)));
-        (from.trim() != me && !party_talk).then(|| (from.trim().to_owned(), text.trim().to_owned()))
-    }) else {
-        return;
-    };
-    let doing = r.goal.as_ref().map(|g| g.label()).unwrap_or_else(|| "thinking".into());
-    match helper.chat_reply(&me, &from, &text, &doing).await {
-        Ok(Some(reply)) => {
-            r.last_reply = Some(Instant::now());
-            tracing::info!(%from, %text, %reply, "chat");
-            bot.act(Action::Say { text: reply }).await.ok();
-        }
-        Ok(None) => {}
-        Err(error) => tracing::debug!(%error, "no chat reply"),
-    }
 }
 
 async fn print_report(bot: &Bot, r: &Run, started: Instant) {

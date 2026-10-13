@@ -9,6 +9,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const FIRST_JOBS: [&str; 6] = ["Swordman", "Mage", "Archer", "Acolyte", "Merchant", "Thief"];
+
+/// The jobs on the way to `job` (its first job, then itself) and the stat build that suits it.
+pub fn job_path(job: &str) -> Option<(Vec<&'static str>, &'static str)> {
+    const PATHS: [(&str, &str, &str); 19] = [
+        ("Swordman", "", "melee"),
+        ("Mage", "", "caster"),
+        ("Archer", "", "archer"),
+        ("Acolyte", "", "caster"),
+        ("Merchant", "", "melee"),
+        ("Thief", "", "melee"),
+        ("Knight", "Swordman", "melee"),
+        ("Crusader", "Swordman", "tank"),
+        ("Wizard", "Mage", "caster"),
+        ("Sage", "Mage", "caster"),
+        ("Hunter", "Archer", "archer"),
+        ("Bard", "Archer", "archer"),
+        ("Dancer", "Archer", "archer"),
+        ("Priest", "Acolyte", "caster"),
+        ("Monk", "Acolyte", "melee"),
+        ("Blacksmith", "Merchant", "melee"),
+        ("Alchemist", "Merchant", "melee"),
+        ("Assassin", "Thief", "melee"),
+        ("Rogue", "Thief", "melee"),
+    ];
+    let (name, first, build) = PATHS.iter().find(|(name, _, _)| same_job(name, job))?;
+    let path = if first.is_empty() { vec![*name] } else { vec![*first, *name] };
+    Some((path, build))
+}
 /// Every job `job_target` can name: the first jobs, then the second jobs.
 pub const JOBS: [&str; 19] = [
     "Swordman", "Mage", "Archer", "Acolyte", "Merchant", "Thief", "Knight", "Crusader", "Wizard", "Sage", "Hunter", "Bard",

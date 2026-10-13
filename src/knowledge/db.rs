@@ -71,6 +71,8 @@ pub struct WarpEnd {
     pub map: Link,
     pub x: u16,
     pub y: u16,
+    /// The walkable part of the map the cell is in.
+    pub region: Option<u32>,
 }
 
 impl MapData {
@@ -88,6 +90,8 @@ pub struct MapWarp {
     pub x_size: u16,
     pub y_size: u16,
     pub to: WarpDest,
+    /// The walkable part of the map the warp is stepped on from.
+    pub region: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,6 +100,8 @@ pub struct WarpDest {
     pub map: Link,
     pub x: u16,
     pub y: u16,
+    /// The walkable part of the map the warp lands in.
+    pub region: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -114,6 +120,8 @@ pub struct MapNpc {
     pub shop: bool,
     pub x: u16,
     pub y: u16,
+    /// The walkable part of the map it is talked to from.
+    pub region: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -137,6 +145,18 @@ pub struct MobData {
     pub element: String,
     pub race: String,
     pub drops: Vec<Drop>,
+    /// Where it spawns.
+    pub spawns: Vec<MobSpawn>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct MobSpawn {
+    pub amount: u32,
+    pub map: Link,
+    /// `normal`, or `boss` for the spawns of an MVP.
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 impl MobData {
@@ -169,7 +189,15 @@ pub struct ItemData {
     pub equip_level_min: u32,
     pub location: u32,
     pub weapon_type: String,
+    pub weapon_level: u32,
+    /// Jobs that can wear it, see `gear::job_flag`.
+    pub job_flags: u64,
+    /// `Male` or `Female` for the items of one sex.
+    pub gender: Option<String>,
+    pub slots: u32,
     pub sold_by: Vec<ShopPlace>,
+    pub dropped_by: Vec<DropSource>,
+    pub arrow_crafting: ArrowCrafting,
     /// The item script, e.g. `itemheal rand(45,65),0;` for a Red Potion.
     pub script: String,
 }
@@ -192,12 +220,66 @@ impl ItemData {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
+pub struct DropSource {
+    pub mob: Link,
+    /// Chance in 1/10000.
+    pub rate: u32,
+    pub mvp: bool,
+}
+
+/// What Arrow Crafting makes of an item.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ArrowCrafting {
+    pub as_source: Vec<ArrowRecipe>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ArrowRecipe {
+    pub makes: Vec<ArrowProduct>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ArrowProduct {
+    pub item: Link,
+    pub amount: u32,
+}
+
+/// An NPC of the reference, with what it sells when it is a shop.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct NpcData {
+    pub name: String,
+    pub map: Link,
+    pub x: u16,
+    pub y: u16,
+    pub shop: Option<Vec<ShopOffer>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ShopOffer {
+    pub item: Link,
+    pub price: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct ShopPlace {
     pub map: Link,
     pub npc: Link,
     pub price: u64,
     pub x: u16,
     pub y: u16,
+}
+
+impl ShopPlace {
+    /// `map:x,y`, as `Memory::bad_shops` holds it.
+    pub fn key(&self) -> String {
+        format!("{}:{},{}", self.map.id_str(), self.x, self.y)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -262,6 +344,12 @@ impl Db {
 
     pub async fn item(&self, id: u32) -> Result<ItemData> {
         self.get_as(&format!("/db/items/{id}")).await
+    }
+
+    /// An NPC by its `map/name` id (the name with its `#suffix`).
+    pub async fn npc(&self, id: &str) -> Result<NpcData> {
+        let path: Vec<String> = id.split('/').map(|p| urlencoding::encode(p).into_owned()).collect();
+        self.get_as(&format!("/db/npcs/{}", path.join("/"))).await
     }
 
     /// Searches a category by name, `?q=`.

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -52,8 +52,22 @@ pub struct Bot {
     /// Sequence number of the strategist's latest directive, and of the one the current goal comes from.
     pub latest_directive: Arc<AtomicU64>,
     pub current_directive: u64,
+    /// Someone spoke to the bot since its last turn of conversation: long behaviours stop so it answers.
+    pub talked_to: AtomicBool,
+    /// The last message looked at for that.
+    pub talk_seq: AtomicU64,
     /// Playing in a party, when the bot was given one.
     pub party: Option<crate::party::PartyPlay>,
+    /// Conversations and requests, see `social`.
+    pub social: crate::social::Social,
+    /// Items not to sell: what the bot's quests ask for.
+    pub keep: Vec<u32>,
+    /// When Arrow Crafting was last tried.
+    pub last_craft: Option<Instant>,
+    /// The spot the current goal is about, so a trip into a map of several rooms takes the right door.
+    pub travel_spot: Option<(String, (u16, u16))>,
+    /// The lines of the last conversation.
+    pub last_dialog: Vec<String>,
 }
 
 impl Bot {
@@ -74,16 +88,29 @@ impl Bot {
             latest_directive: Arc::new(AtomicU64::new(0)),
             current_directive: 0,
             party: None,
+            social: Default::default(),
+            talked_to: AtomicBool::new(false),
+            talk_seq: AtomicU64::new(0),
+            keep: Vec::new(),
+            last_craft: None,
+            travel_spot: None,
+            last_dialog: Vec::new(),
         }
     }
 
-    /// Whether a long behaviour should stop because the strategist changed its mind.
+    /// Whether a long behaviour should stop: the strategist changed its mind, or someone waits for an answer.
     pub fn preempted(&self) -> bool {
-        self.current_directive != 0 && self.latest_directive.load(Ordering::SeqCst) > self.current_directive
+        (self.current_directive != 0 && self.latest_directive.load(Ordering::SeqCst) > self.current_directive)
+            || self.talked_to.load(Ordering::SeqCst)
     }
 
     pub async fn observe(&self) -> Result<Observation> {
-        self.api.observation(&self.name).await
+        let obs = self.api.observation(&self.name).await?;
+        let last = self.talk_seq.fetch_max(obs.last_message_seq(), Ordering::SeqCst);
+        if obs.messages.iter().any(|m| m.seq > last && crate::social::calls_for_answer(m, &obs.me.name)) {
+            self.talked_to.store(true, Ordering::SeqCst);
+        }
+        Ok(obs)
     }
 
     pub async fn act(&self, action: Action) -> Result<Value> {

@@ -28,8 +28,47 @@ pub struct Observation {
     /// What the last booking search found.
     pub booking_results: Option<BookingResults>,
     pub trade: Option<Trade>,
-    pub skill_menu: Option<Value>,
+    pub skill_menu: Option<SkillMenu>,
     pub duel_invitation: bool,
+    /// The quest window: quests started and not completed.
+    pub quests: Vec<QuestEntry>,
+    pub chat_room: Option<ChatRoom>,
+}
+
+/// A skill waiting for a choice (Arrow Crafting, Teleport...): answer with `skill_choose`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SkillMenu {
+    pub skill: String,
+    pub kind: String,
+    pub choices: Vec<SkillChoice>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SkillChoice {
+    /// A map name or a number, depending on the skill.
+    pub choice: Value,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuestEntry {
+    pub id: u32,
+    pub title: String,
+    pub active: bool,
+    pub expires_in: Option<u32>,
+    pub objectives: Vec<QuestObjective>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuestObjective {
+    pub mob_id: u32,
+    pub name: String,
+    pub done: u32,
+    pub total: u32,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -38,6 +77,8 @@ pub struct Me {
     pub name: String,
     pub char_id: u64,
     pub job: String,
+    /// `male` or `female`.
+    pub sex: String,
     pub base_level: u32,
     pub job_level: u32,
     pub hp: u32,
@@ -46,6 +87,7 @@ pub struct Me {
     pub max_sp: u32,
     pub zeny: u64,
     pub weight: u32,
+    pub max_weight: u32,
     pub status_points: u32,
     pub skill_points: u32,
     pub stats: Stats,
@@ -55,6 +97,8 @@ pub struct Me {
     pub moving: bool,
     pub attack_target: Option<u64>,
     pub dead: bool,
+    /// The walkable part of the map the bot is in (a room of an interior map).
+    pub region: Option<u32>,
 }
 
 impl Me {
@@ -232,6 +276,30 @@ pub struct Npc {
     pub name: String,
     pub x: u16,
     pub y: u16,
+    /// A quest icon shows above it: it has a quest, or the next step of one, for the bot.
+    pub quest_icon: bool,
+    /// Its waiting room, where players queue for a test.
+    pub waiting_room: Option<NpcRoom>,
+    pub region: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct NpcRoom {
+    pub title: String,
+    pub waiting: u32,
+    pub limit: u32,
+}
+
+/// The chat room (or NPC waiting room) the bot is in.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ChatRoom {
+    pub id: u64,
+    pub title: String,
+    pub members: Vec<String>,
+    /// The NPC of a waiting room.
+    pub npc: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -270,6 +338,7 @@ pub struct Warp {
     pub to_map: String,
     pub to_x: u16,
     pub to_y: u16,
+    pub region: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -281,6 +350,35 @@ pub struct InventoryItem {
     pub kind: String,
     pub amount: u32,
     pub equipped: bool,
+    /// Weight of one, in the units of `self.weight`.
+    pub weight: u32,
+    pub sell_price: u32,
+    /// For equipment: where it goes and whether the bot can wear it.
+    pub equip: Option<Equip>,
+}
+
+impl InventoryItem {
+    /// Worn, and of use: a piece the job cannot wear any more (a Novice's Axe on an Acolyte) stays on after the job
+    /// change and adds nothing.
+    pub fn worn_and_usable(&self) -> bool {
+        self.equipped && self.equip.as_ref().is_none_or(|e| e.why_not.is_none())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Equip {
+    /// `HeadTop`, `HeadMid`, `HeadLow`, `Armor`, `HandRight` (weapon), `HandLeft` (shield), `Garment`, `Shoes`,
+    /// `AccessoryLeft`, `AccessoryRight`, `Ammo`.
+    pub slots: Vec<String>,
+    pub attack: Option<i32>,
+    pub defense: Option<i32>,
+    pub weapon_level: Option<i32>,
+    pub equip_level: Option<i32>,
+    pub refine: i32,
+    pub identified: bool,
+    pub can_equip: bool,
+    pub why_not: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -62,6 +62,18 @@ pub struct Snapshot {
     pub visited: HashSet<String>,
     /// Goals that failed recently, not to be offered again for a while.
     pub recent_failures: Vec<Goal>,
+    /// Shops the bot cannot buy from, as `map:x,y`.
+    pub bad_shops: Vec<String>,
+    /// Monsters that keep killing the bot at its level: left alone like `avoid_mobs`.
+    pub losing_to: Vec<String>,
+    /// Where the bot stands in the quests it took up.
+    pub quests: crate::quests::QuestBook,
+    /// What people asked the bot in chat, not decided yet.
+    pub requests: Vec<crate::social::Request>,
+    /// The bot may play in a party (not `--solo`).
+    pub party_play: bool,
+    /// The characters the bot was told it plays with.
+    pub friends: Vec<String>,
 }
 
 /// Why the strategist should think now. The texts are only read through `Debug`, in the trigger log.
@@ -74,12 +86,20 @@ pub enum Event {
     MapChanged,
     GoalDone(String),
     GoalFailed(String),
+    /// Someone asked the bot for something in chat.
+    Asked,
 }
 
 #[derive(Debug, Clone)]
 pub struct Directive {
     pub seq: u64,
     pub goal: Goal,
+    /// The id of the option chosen: `ask:<n>` takes the request `n`.
+    pub option: String,
+    /// The requests the decision saw: those not taken are declined.
+    pub asked: Vec<u64>,
+    /// Why the bot cannot do some of them, by request id.
+    pub refusals: Vec<(u64, String)>,
     pub reason: String,
     pub state: StrategicState,
     pub by_llm: bool,
@@ -140,14 +160,18 @@ async fn run(
         let snap = snapshots.borrow().clone();
         let Some(snap) = snap else { return };
         match decide(&knowledge, llm.as_ref(), &mut state, &snap, &mut counters, &mut history).await {
-            Ok((goal, reason, by_llm)) => {
+            Ok((chosen, reason, by_llm)) => {
+                let goal = chosen.goal;
                 seq += 1;
                 tracing::info!(target: "strategist", seq, trigger = %why, goal = %goal.label(), by_llm, %reason, "directive");
-                if last_goal.as_ref() != Some(&goal) {
+                let asked: Vec<u64> = snap.requests.iter().map(|r| r.id).collect();
+                // Someone waits for an answer: the step under way stops so the agent says it now
+                if last_goal.as_ref() != Some(&goal) || !asked.is_empty() {
                     goal_changes.store(seq, Ordering::SeqCst);
                     last_goal = Some(goal.clone());
                 }
-                let d = Directive { seq, goal, reason, state: state.clone(), by_llm, counters: counters.clone() };
+                let refusals = options::request_refusals(&snap);
+                let d = Directive { seq, goal, option: chosen.id, asked, refusals, reason, state: state.clone(), by_llm, counters: counters.clone() };
                 if directives.send(Some(d)).is_err() {
                     return;
                 }
@@ -178,11 +202,12 @@ async fn decide(
     snap: &Snapshot,
     counters: &mut Counters,
     history: &mut Option<history::History>,
-) -> Result<(Goal, String, bool)> {
+) -> Result<(Opt, String, bool)> {
     state.on_job(&snap.obs.me.job);
     let options = build_options(snap, knowledge, state).await?;
+    tracing::debug!(target: "strategist", options = ?options.iter().map(|o| (&o.id, o.score)).collect::<Vec<_>>(), "options");
     if options.len() == 1 {
-        return Ok((options[0].goal.clone(), "only option".into(), false));
+        return Ok((options[0].clone(), "only option".into(), false));
     }
     // A share of the steps goes to the fallback, to compare the two and to save LLM time.
     if let Some(llm) = llm.filter(|l| rand::random::<f32>() < l.share) {
@@ -217,7 +242,7 @@ async fn decide(
                     rejected = ?report.rejected,
                     "LLM step"
                 );
-                return Ok((d.option.goal, d.reason, true));
+                return Ok((d.option, d.reason, true));
             }
             Err(error) => {
                 counters.llm_invalid += 1;
@@ -226,7 +251,8 @@ async fn decide(
         }
     }
     let o = fallback(snap, &options, state).ok_or_else(|| anyhow!("no option"))?;
-    Ok((o.goal, format!("fallback: {}", o.line), false))
+    let reason = format!("fallback: {}", o.line);
+    Ok((o, reason, false))
 }
 
 fn commit_definition(options: &[Opt]) -> ToolDefinition {

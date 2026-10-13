@@ -28,10 +28,12 @@ Guidelines:
 - Keep hunting on the current map while it works; switch when a listed map has clearly better exp/s (1.5 times or more) at low threat.
 - Healing is counted in HP: \"1.0x max HP\" means your healing items give back your max HP once. Buy potions below 1.0x when you can afford them. Sell loot when weight is above 40%, or when healing is below 1.0x and you have too little zeny to buy potions.
 - When job_change options appear, take the one matching job_target (or stat_build: melee/tank -> Swordman, caster -> Mage, archer -> Archer).
+- gear options buy a better weapon or armor with the zeny left after potions: take one when it is not far, it makes every fight easier.
+- ask options answer someone who asked you for something in chat: help party members and friends; help others when it costs little and is safe. Not taking it says no politely.
 - Set an objective early and keep it until it is reached.
 - notes are for lessons learned (\"Lunatics flee, Porings are faster kills\"), never for numbers already in OBSERVATION.
 
-Game primer (Ragnarok Online, pre-renewal rules; this server gives 5x experience):
+Game primer (Ragnarok Online, pre-renewal rules):
 - Killing monsters gives base experience (base level, up to 99) and job experience (job level). Dying costs 1% of the base experience needed for the next level and sends you back to town.
 - Stats: STR melee damage and carry weight; AGI attack speed and dodging; VIT max HP, HP regeneration and healing item power; INT max SP and magic; DEX hit chance, bow damage and cast time; LUK critical hits. Each level gives status points; high stats cost more points.
 - Jobs: everyone starts as a Novice. At job level 10 a Novice becomes one of six first jobs: Swordman (melee, tough), Mage (magic, fragile), Archer (bows, DEX), Acolyte (healing and support), Merchant (trade, carries more), Thief (AGI, dodging). At job level 40 or more a first job becomes a second job: Swordman -> Knight or Crusader, Mage -> Wizard or Sage, Archer -> Hunter or Bard/Dancer, Acolyte -> Priest or Monk, Merchant -> Blacksmith or Alchemist, Thief -> Assassin or Rogue. Job level starts again at 1 after a change.

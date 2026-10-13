@@ -36,6 +36,12 @@ pub fn candidate_steps(goal: &Goal, ctx: &PlanContext) -> Vec<Step> {
     if let Goal::JobChange { job } = goal {
         steps.push(Step::ChangeJob { job: job.clone() });
     }
+    match goal {
+        Goal::BuyGear { item, map, .. } => steps.push(Step::BuyGear { item: *item, map: map.clone() }),
+        Goal::BuyItem { item, amount, map, .. } => steps.push(Step::BuyItem { item: *item, amount: *amount, map: map.clone() }),
+        Goal::Quest { id, map, .. } => steps.push(Step::Quest { id: id.clone(), map: map.clone() }),
+        _ => {}
+    }
     steps
 }
 
@@ -138,6 +144,23 @@ mod tests {
         let mut ws = town();
         ws.job_change_ready = true;
         assert_eq!(plan(&ws, &goal, &ctx).unwrap(), vec![Step::ChangeJob { job: "Swordman".into() }]);
+    }
+
+    #[test]
+    fn gear_is_bought_at_its_shop() {
+        let goal = Goal::BuyGear { item: 1107, name: "Blade".into(), map: "prt_in".into(), x: 1, y: 2 };
+        let plan = plan(&town(), &goal, &PlanContext::default()).unwrap();
+        assert_eq!(plan, vec![Step::Travel { map: "prt_in".into() }, Step::BuyGear { item: 1107, map: "prt_in".into() }]);
+    }
+
+    #[test]
+    fn arrows_are_supplies() {
+        let mut ws = town();
+        ws.has_potions = true;
+        ws.ammo_low = true;
+        ws.can_afford_potions = true;
+        let ctx = PlanContext { shop_map: Some("prontera".into()), ..Default::default() };
+        assert_eq!(plan(&ws, &Goal::BuyPotions, &ctx).unwrap(), vec![Step::WalkToShop, Step::BuyPotions]);
     }
 
     #[test]
