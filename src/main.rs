@@ -87,9 +87,22 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
     let mut bot = Bot::new(api, cli.name.clone(), knowledge.clone(), memory, helper);
     if let Some(name) = &args.party {
         let obs = bot.observe().await?;
-        let config = party::PartyConfig { name: name.clone(), friends: args.friends.clone(), lead: args.lead, role: args.role };
+        let config =
+            party::PartyConfig { name: name.clone(), friends: args.friends.clone(), lead: args.lead, role: args.role, auto: false };
         tracing::info!(party = %name, friends = ?config.friends, lead = config.lead, role = ?config.role, "playing in a party");
         bot.memory.strategy.pin_role(args.role.jobs(), args.role.stat_build(), &obs.me.job);
+        bot.party = Some(party::PartyPlay::new(config, obs.last_message_seq()));
+    } else if !args.solo {
+        // Finds a party on the booking board, as a player would
+        let obs = bot.observe().await?;
+        let config = party::PartyConfig {
+            name: String::new(),
+            friends: args.friends.clone(),
+            lead: false,
+            role: party::Role::of_job(&obs.me.job),
+            auto: true,
+        };
+        tracing::info!(friends = ?config.friends, "finding a party on the booking board");
         bot.party = Some(party::PartyPlay::new(config, obs.last_message_seq()));
     }
     let handle = strategist::spawn(

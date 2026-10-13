@@ -76,13 +76,24 @@ A bot knows its party only as a player does: the party window (members, their ma
 and HP bar), party chat, and what is in sight (`SIGHT`, 14 cells). Each bot is its own process; nothing passes between
 them another way.
 
+- By default (no `--party`, no `--solo`) a bot finds a party by itself on the game's party booking board
+  (`party/recruit.rs`). Without a party it searches the board every 45 s and whispers whoever put up an ad within 10
+  levels (`party? level 12/8 Novice`), then takes the invitation that comes back; it also takes invitations from
+  someone in sight within 10 levels. Finding nobody, a bot with Basic Skill 7 creates `<name>'s party` and puts up an ad;
+  it invites whoever whispers it with a level within 10 (`sorry, the party is full` past 4 members, or `sorry, our
+  levels are too far apart`), and takes the ad down once full. Two lone leaders merge: the one with the newer ad leaves
+  its party and asks the other. A member leaves when the leader has been out of the game for 10 minutes, or is more
+  than 15 levels away. The role follows the job (Acolyte line heals, Swordman line provokes) and pins nothing.
+  Verified live: Alfa and Charlie created parties at the same second, Alfa joined Charlie's within a minute, and Bravo
+  (who cannot create one) found the ad and joined after its errand.
 - `--party <name> --friends A,B,C [--lead] [--role healer|tank|fighter]`. The leader creates the party once it has
   Basic Skill 7 (the server's rule for creating one), invites the friends that are not in it every minute (an
   invitation fails while the friend is out of the game), and turns experience sharing on (refused while levels are more
   than 15 apart). The others accept invitations from friends only.
 - Party chat (`party/chat.rs`), plain words a person can type too: `hunting at <map>` (the leader, when its hunt
   goal changes), `level <base>/<job> <Job>` (on joining and every level), `follow me`, `stay here`, `heal please`
-  (below 40% HP with a healer in sight), `out of potions`, `sending potions to <name>`, `brb, <errand>` and `back`.
+  (below 40% HP with a healer in sight), `out of potions`, `sending potions to <name>`, `brb, <errand>` and `back`;
+  whispered: `party? level <base>/<job> <Job>` and `sorry, <reason>`.
 - A member follows the leader (or whoever said `follow me`): to its map with the travel behaviour, then within 7 cells.
   It fights, in order: a monster attacking a member, what the leader hits (its sprite shows it), the best target within
   10 cells of the leader. Errands (sell, buy potions, job change, leaving the training grounds) still run as planned,
@@ -138,7 +149,7 @@ them another way.
 cargo run -- --key-file "D:/downloads/ro-sppack/rust-ro/config/bots_api_key.txt" --name Goapy probe
 cargo run -- --key-file ... --name Goapy run [--minutes N] [--until-level N] [--no-llm] [--llm-share 0.5]
     [--context skill-state|history] [--order task-first|data-first] [--strategist-period 45]
-    [--party Wayfarers --friends Alfa,Bravo,Charlie [--lead] [--role healer|tank|fighter]]
+    [--party Wayfarers --friends Alfa,Bravo,Charlie [--lead] [--role healer|tank|fighter] | --solo]
 cargo run -- --key-file ... --name Goapy llm-check                  # one SKILL.state step on the live state
 cargo run -- --key-file ... --name Goapy history-check --turns 10 [--compact-at N --compact-to N] [--model-compaction]
 cargo run -- llm-eval [--n 5] [--order ...] [--no-examples]         # 8 fixed scenarios, no game server needed

@@ -72,6 +72,10 @@ pub enum Action {
     Say {
         text: String,
     },
+    Whisper {
+        to: String,
+        text: String,
+    },
     Command {
         text: String,
     },
@@ -88,6 +92,12 @@ pub enum Action {
     },
     PartyAccept,
     PartyDecline,
+    PartyLeave,
+    /// Puts up a party booking ad with the bot's level, open to any job.
+    BookingRegister,
+    /// Searches the booking board, all levels.
+    BookingSearch,
+    BookingDelete,
     PartyOptions {
         #[serde(skip_serializing_if = "Option::is_none")]
         exp_share: Option<bool>,
@@ -133,12 +143,17 @@ impl Action {
             Action::LearnSkill { .. } => "learn_skill",
             Action::Skill { .. } => "skill",
             Action::Say { .. } => "say",
+            Action::Whisper { .. } => "whisper",
             Action::Command { .. } => "command",
             Action::PartyChat { .. } => "party_chat",
             Action::PartyCreate { .. } => "party_create",
             Action::PartyInvite { .. } => "party_invite",
             Action::PartyAccept => "party_accept",
             Action::PartyDecline => "party_decline",
+            Action::PartyLeave => "party_leave",
+            Action::BookingRegister => "booking_register",
+            Action::BookingSearch => "booking_search",
+            Action::BookingDelete => "booking_delete",
             Action::PartyOptions { .. } => "party_options",
             Action::TradeRequest { .. } => "trade_request",
             Action::TradeAccept => "trade_accept",
@@ -163,5 +178,6 @@ mod tests {
         assert_eq!(json, serde_json::json!({"type": "dialog_close"}));
         let json = serde_json::to_value(Action::PartyOptions { exp_share: Some(true), item_pickup: None, item_share: None }).unwrap();
         assert_eq!(json, serde_json::json!({"type": "party_options", "exp_share": true}));
+        assert_eq!(serde_json::to_value(Action::BookingSearch).unwrap(), serde_json::json!({"type": "booking_search"}));
     }
 }

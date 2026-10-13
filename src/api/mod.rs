@@ -6,6 +6,6 @@ pub mod observation;
 
 pub use action::{Action, BuyLine, SellLine};
 pub use client::{ApiError, BotApi};
-pub use observation::{Observation, Party, PartyMember, Trade, dist};
+pub use observation::{BookingAd, Observation, Party, PartyInvitation, PartyMember, Trade, dist};
 #[cfg(test)]
 pub use observation::{Message, Mob, Player};

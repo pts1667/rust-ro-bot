@@ -49,7 +49,7 @@ impl Bot {
     /// The role's part, one action at most. Returns whether it acted.
     pub(super) async fn support(&mut self, obs: &Observation) -> Result<bool> {
         let Some(play) = &self.party else { return Ok(false) };
-        match play.config.role {
+        match play.role(&obs.me.job) {
             Role::Healer => self.heal_members(obs).await,
             Role::Tank => self.provoke(obs).await,
             Role::Fighter => Ok(false),

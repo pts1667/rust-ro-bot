@@ -138,6 +138,9 @@ pub struct RunArgs {
     /// Lead the party: create it, invite the friends, choose where to hunt.
     #[arg(long)]
     pub lead: bool,
+    /// Play alone: no party, not even one found on the booking board.
+    #[arg(long, conflicts_with = "party")]
+    pub solo: bool,
     /// The bot's part in the party; healer and tank also set the job it heads for.
     #[arg(long, value_enum, default_value_t = crate::party::Role::Fighter)]
     pub role: crate::party::Role,

@@ -2,12 +2,14 @@
 //! their position and HP bar), party chat, and what is in sight. Nothing passes between the bots any other way; a
 //! person can lead them or play along with the same words (see `chat`).
 //!
-//! The leader creates the party, invites its friends, turns experience sharing on, and hunts where its strategist
-//! says, telling the party where. The others accept their friends' invitations and follow the leader: they walk to its
+//! Without a configured party a bot finds one by itself on the party booking board (see `recruit`). With one, the
+//! leader creates the party, invites its friends, turns experience sharing on, and hunts where its strategist says,
+//! telling the party where. The others accept their friends' invitations and follow the leader: they walk to its
 //! map, keep near it, fight what attacks a member, then what the leader hits, then what is near the leader. Errands
 //! (selling, buying potions, a job change) still go first, with a word to the party.
 
 pub mod chat;
+pub mod recruit;
 pub mod support;
 
 use std::collections::HashMap;
@@ -65,6 +67,18 @@ impl Role {
         }
     }
 
+    /// The role a job plays, for a bot that did not choose one.
+    pub fn of_job(job: &str) -> Role {
+        let job = job.to_lowercase();
+        if ["acolyte", "priest", "monk"].iter().any(|j| job.starts_with(&j[..4])) {
+            Role::Healer
+        } else if ["swordman", "knight", "crusader"].iter().any(|j| job.starts_with(&j[..4])) {
+            Role::Tank
+        } else {
+            Role::Fighter
+        }
+    }
+
     pub fn stat_build(self) -> Option<&'static str> {
         match self {
             Role::Healer => Some("caster"),
@@ -82,6 +96,8 @@ pub struct PartyConfig {
     pub friends: Vec<String>,
     pub lead: bool,
     pub role: Role,
+    /// Finds its party by itself on the booking board, its role follows its job.
+    pub auto: bool,
 }
 
 impl PartyConfig {
@@ -119,6 +135,8 @@ pub struct PartyPlay {
     pub buffs: HashMap<(String, &'static str), Instant>,
     /// When the current trade window opened.
     pub trade_since: Option<Instant>,
+    /// Finding a party by itself, see `recruit`.
+    pub recruiting: recruit::Recruiting,
 }
 
 impl PartyPlay {
@@ -144,7 +162,13 @@ impl PartyPlay {
             asked_heal: None,
             buffs: HashMap::new(),
             trade_since: None,
+            recruiting: recruit::Recruiting::new(last_seq),
         }
+    }
+
+    /// The bot's part in the party: the configured one, or the one of its job.
+    pub fn role(&self, job: &str) -> Role {
+        if self.config.auto { Role::of_job(job) } else { self.config.role }
     }
 
     /// Takes in the party chat said since the last call.
@@ -187,7 +211,8 @@ impl PartyPlay {
                 Said::Back => {
                     self.away.remove(&line.from);
                 }
-                Said::Other(_) => {}
+                // Whispered about joining, see `recruit`
+                Said::Other(_) | Said::WantParty { .. } | Said::Sorry(_) => {}
             }
         }
         self.last_seq = self.last_seq.max(obs.last_message_seq());
@@ -274,6 +299,11 @@ fn leader_of(party: &Party) -> Option<&PartyMember> {
     party.members.iter().find(|m| m.leader)
 }
 
+/// Whether two job names are the same job (`Swordman`, `Swordsman`).
+pub(crate) fn same_job(a: &str, b: &str) -> bool {
+    a.len() >= 3 && b.len() >= 3 && a[..3].eq_ignore_ascii_case(&b[..3])
+}
+
 impl Bot {
     /// Says something on the party channel, at most every `CHAT_GAP`. Returns whether it was said.
     pub async fn say_to_party(&mut self, said: Said) -> bool {
@@ -303,7 +333,8 @@ impl Bot {
         let config = play.config.clone();
 
         if let Some(invitation) = &obs.party_invitation {
-            let accept = obs.party.is_none() && config.is_friend(&invitation.inviter_name);
+            let accept = obs.party.is_none()
+                && (config.is_friend(&invitation.inviter_name) || (config.auto && play.recruiting.takes(obs, invitation)));
             tracing::info!(from = %invitation.inviter_name, accept, "party invitation");
             self.act(if accept { Action::PartyAccept } else { Action::PartyDecline }).await.ok();
             return Ok(true);
@@ -311,7 +342,10 @@ impl Bot {
         if self.answer_trade(obs).await? {
             return Ok(true);
         }
-        if config.lead && self.form_party(obs).await? {
+        if config.auto && self.recruit(obs).await? {
+            return Ok(true);
+        }
+        if (config.lead || config.auto) && self.form_party(obs).await? {
             return Ok(true);
         }
         let Some(party) = &obs.party else { return Ok(false) };
@@ -340,7 +374,8 @@ impl Bot {
     async fn form_party(&mut self, obs: &Observation) -> Result<bool> {
         let play = self.party.as_mut().expect("party play");
         let Some(party) = &obs.party else {
-            if obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE || play.last_create.is_some_and(|at| at.elapsed() < CREATE_EVERY) {
+            // A bot finding its own party creates it while recruiting
+            if play.config.auto || obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE || play.last_create.is_some_and(|at| at.elapsed() < CREATE_EVERY) {
                 return Ok(false);
             }
             play.last_create = Some(Instant::now());
@@ -508,7 +543,7 @@ mod tests {
     use crate::api::{Message, Mob, Player};
 
     fn config() -> PartyConfig {
-        PartyConfig { name: "Wanderers".into(), friends: vec!["Alpha".into(), "Beta".into()], lead: false, role: Role::Fighter }
+        PartyConfig { name: "Wanderers".into(), friends: vec!["Alpha".into(), "Beta".into()], lead: false, role: Role::Fighter, auto: false }
     }
 
     fn member(name: &str, leader: bool, map: &str, pos: Option<(u16, u16)>) -> PartyMember {

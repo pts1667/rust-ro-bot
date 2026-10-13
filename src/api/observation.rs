@@ -23,6 +23,10 @@ pub struct Observation {
     pub storage: Option<Value>,
     pub party: Option<Party>,
     pub party_invitation: Option<PartyInvitation>,
+    /// The party booking ad the bot put up.
+    pub booking: Option<BookingAd>,
+    /// What the last booking search found.
+    pub booking_results: Option<BookingResults>,
     pub trade: Option<Trade>,
     pub skill_menu: Option<Value>,
     pub duel_invitation: bool,
@@ -111,6 +115,38 @@ pub struct Player {
     pub attack_target: Option<u64>,
     /// A member of the bot's party.
     pub party: bool,
+    pub base_level: u32,
+    pub job_level: u32,
+    pub sex: String,
+    pub action: String,
+    /// The party and guild it is in, `None` for none.
+    pub party_name: Option<String>,
+    pub guild_name: Option<String>,
+    /// HP bar, for the members of the bot's party only.
+    pub hp: Option<u32>,
+    pub max_hp: Option<u32>,
+    /// The title of the chat room it opened.
+    pub chat_room: Option<String>,
+}
+
+/// An ad of the party booking board: a party looking for members.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BookingAd {
+    pub index: u64,
+    /// Who put it up: whisper them to join.
+    pub name: String,
+    pub level: i32,
+    pub map_id: i32,
+    /// The jobs it looks for, empty for anyone.
+    pub jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BookingResults {
+    pub ads: Vec<BookingAd>,
+    pub more: bool,
 }
 
 /// The party window of the game client.
@@ -136,6 +172,9 @@ pub struct PartyMember {
     pub map: String,
     pub leader: bool,
     pub online: bool,
+    /// While the member is in the game.
+    pub job: Option<String>,
+    pub base_level: Option<u32>,
     /// On the bot's map only.
     pub x: Option<u16>,
     pub y: Option<u16>,

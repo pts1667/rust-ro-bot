@@ -12,6 +12,7 @@ use crate::config::RunArgs;
 use crate::goap::state::{Extra, is_loot};
 use crate::goap::{Goal, PlanContext, Step, WorldState, plan};
 use crate::memory::Counters;
+use crate::party::chat::Said;
 use crate::strategist::options::JOB_MAP;
 use crate::strategist::{Event, Handle, Snapshot};
 
@@ -369,7 +370,9 @@ async fn reply_to_chat(bot: &mut Bot, r: &mut Run, obs: &Observation) {
     let me = obs.me.name.clone();
     let Some((from, text)) = new.iter().filter(|m| m.channel == "chat" || m.channel == "whisper").find_map(|m| {
         let (from, text) = m.text.split_once(" : ")?;
-        (from.trim() != me).then(|| (from.trim().to_owned(), text.trim().to_owned()))
+        // Asking to join a party, and the answer, are the party's business
+        let party_talk = matches!(crate::party::chat::parse(&m.text).map(|l| l.said), Some(Said::WantParty { .. } | Said::Sorry(_)));
+        (from.trim() != me && !party_talk).then(|| (from.trim().to_owned(), text.trim().to_owned()))
     }) else {
         return;
     };
