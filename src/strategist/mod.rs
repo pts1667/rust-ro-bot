@@ -295,7 +295,11 @@ pub fn apply_lessons(
 /// Swordman 7 times in 10.
 fn pick_first_job(state: &mut StrategicState, snap: &Snapshot) {
     let s = &snap.obs.me.stats;
-    let stats = [s.str, s.agi, s.vit, s.int, s.dex, s.luk];
+    pick_first_job_from(state, [s.str, s.agi, s.vit, s.int, s.dex, s.luk]);
+}
+
+/// `pick_first_job` on the stats as they are.
+fn pick_first_job_from(state: &mut StrategicState, stats: [u32; 6]) {
     let fresh = stats.iter().all(|v| *v == stats[0]);
     let jobs = skill_state::open_first_jobs(stats, &state.stat_build);
     let job = jobs[rand::random_range(0..jobs.len())];

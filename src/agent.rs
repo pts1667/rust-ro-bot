@@ -249,7 +249,11 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
 
     bot.keep = crate::quests::kept_items(&bot.memory.quests);
     let mut ws = world_state(bot, &obs);
-    if ws.status_points {
+    // A Novice without a job holds its points: the strategist picks the job first, and its build decides where they go
+    let awaits_job = obs.me.job.eq_ignore_ascii_case("novice")
+        && bot.memory.strategy.job_target.is_none()
+        && bot.memory.strategy.pinned_jobs.is_empty();
+    if ws.status_points && !awaits_job {
         let outcome = bot.raise_stats().await?;
         tracing::info!(?outcome, "spent status points");
         return Ok(());

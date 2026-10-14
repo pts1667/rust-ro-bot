@@ -65,8 +65,9 @@ const STRAY: &str = "stepped on another warp";
 const MAX_STRAYS: usize = 4;
 /// How long a warp stepped off by mistake stays out of the routes of trips, once it was stepped off twice.
 pub const STRAY_MEMORY: Duration = Duration::from_secs(10 * 60);
-/// Times a walk to a warp landed on another map, within `STRAY_MEMORY`, after which the trips leave that warp out.
-const STRAYS_TO_AVOID: usize = 2;
+/// Times a walk to a warp landed on another map, within `STRAY_MEMORY`, after which the trips leave that warp out. One
+/// is enough: the walk to the same warp landed on the same other warp 172 times in 30 minutes of one run.
+const STRAYS_TO_AVOID: usize = 1;
 /// How long a map the bot died crossing stays out of its routes and hunting grounds.
 pub const DEADLY_WAY_MEMORY: Duration = Duration::from_secs(30 * 60);
 /// A walk to a warp this far or further is a long one: the server walks it in legs found over the whole map, which go
@@ -407,6 +408,8 @@ impl Bot {
                 // On another map than planned: the next leg starts from there, and walks go around that warp now
                 Outcome::Failed(reason) if reason.starts_with(STRAY) => {
                     strays += 1;
+                    // The rest of this trip goes another way, or gives up
+                    skip.insert(edge.key());
                     self.stray_edges.push((edge.key(), Instant::now()));
                     if strays >= MAX_STRAYS {
                         return Ok(Outcome::failed(format!(
@@ -459,7 +462,7 @@ impl Bot {
         if now.map.name == from || now.map.name == edge.to {
             return Ok(outcome);
         }
-        tracing::info!(on = %from, landed = %now.map.name, wanted = %edge.to, "stepped on another warp on the way");
+        tracing::info!(on = %from, at = ?now.pos(), landed = %now.map.name, wanted = %edge.to, "stepped on another warp on the way");
         Ok(Outcome::failed(format!(
             "{STRAY}: the warp to {} on {from}, going to {}",
             now.map.name, edge.to
@@ -807,7 +810,7 @@ mod tests {
     use super::{avoided_strays, first_door, leg_toward};
 
     #[test]
-    fn a_warp_kept_landed_off_is_avoided_by_the_trips() {
+    fn a_warp_stepped_off_is_avoided_by_the_trips() {
         let now = std::time::Instant::now();
         let edges = vec![
             ("a".to_owned(), now),
@@ -816,9 +819,9 @@ mod tests {
         ];
         assert_eq!(
             avoided_strays(&edges),
-            std::collections::HashSet::from(["a".to_owned()])
+            std::collections::HashSet::from(["a".to_owned(), "b".to_owned()])
         );
-        assert!(avoided_strays(&edges[..2]).is_empty());
+        assert!(avoided_strays(&[]).is_empty());
     }
 
     #[test]
