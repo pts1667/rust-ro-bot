@@ -1,10 +1,14 @@
 //! Picking a sentence the way a player goes through a menu: the topics, then the sentences of one, with Back to the
 //! topics (at most `MAX_BACKS` times per message). The model sees the whole menu at each step: the topics while it is
 //! in one (not as choices), and what it saw in the topics it went back from.
+//!
+//! The topics are the catalogue's (`phrase::TOPICS`), except that what the bot knows about one monster or item makes
+//! a topic of its own ("about_fabre") once there are `SUBJECT_MIN` sentences about it: lore grows with what the bot
+//! knows, and questions are asked about a monster ("is Fabre strong?").
 
 use anyhow::{Result, anyhow};
 
-use super::phrase::{Phrase, TOPICS, Topic};
+use super::phrase::{Category, Phrase, TOPICS};
 use super::systemone::{Question, SystemOne};
 
 /// Most times the model may go back to the topics in one walk.
@@ -13,6 +17,102 @@ pub const MAX_BACKS: usize = 2;
 const TOPIC_TEMPERATURE: f64 = 0.5;
 const SENTENCE_TEMPERATURE: f64 = 0.8;
 const BACK: &str = "back";
+/// Sentences about one monster or item from which they make a topic of their own.
+const SUBJECT_MIN: usize = 2;
+/// The catalogue topics whose sentences go to subjects; the subjects come where the first of them was.
+const SUBJECT_TOPICS: [&str; 4] = ["monster_where", "monster_strength", "items", "danger"];
+/// Templates that are about an item even with a monster in them ("{item} drops from {monster}").
+const ITEM_TEMPLATES: [&str; 3] = ["dropped_by", "sold_on", "price_on"];
+
+/// A topic of the menu, with its sentences.
+#[derive(Debug, Clone)]
+pub struct Group<'a> {
+    pub key: String,
+    /// For the model.
+    pub description: String,
+    pub phrases: Vec<&'a Phrase>,
+}
+
+/// The menu's topics for `phrases`, in catalogue order, each with its sentences; empty topics are left out.
+pub fn groups<'a>(phrases: &[&'a Phrase]) -> Vec<Group<'a>> {
+    // Monsters and items with enough sentences about them
+    let mut subjects: Vec<Group<'a>> = Vec::new();
+    for p in phrases {
+        let Some((kind, name)) = subject(p) else {
+            continue;
+        };
+        let key = subject_key(name);
+        match subjects.iter_mut().find(|g| g.key == key) {
+            Some(g) => g.phrases.push(p),
+            None => subjects.push(Group {
+                key,
+                description: subject_description(kind, name),
+                phrases: vec![p],
+            }),
+        }
+    }
+    subjects.retain(|g| g.phrases.len() >= SUBJECT_MIN);
+    let in_subject = |p: &Phrase| subjects.iter().any(|g| g.phrases.iter().any(|q| *q == p));
+    let mut out = Vec::new();
+    let mut placed = false;
+    for t in TOPICS {
+        if !placed && SUBJECT_TOPICS.contains(&t.key) {
+            placed = true;
+            out.extend(subjects.iter().cloned());
+        }
+        let of: Vec<&Phrase> = phrases
+            .iter()
+            .copied()
+            .filter(|p| t.templates.contains(&p.template) && !in_subject(p))
+            .collect();
+        if !of.is_empty() {
+            out.push(Group {
+                key: t.key.to_owned(),
+                description: t.description.to_owned(),
+                phrases: of,
+            });
+        }
+    }
+    out
+}
+
+/// What a lore sentence or a warning is about: ("monster" or "item", the name).
+fn subject(p: &Phrase) -> Option<(&'static str, &str)> {
+    if ITEM_TEMPLATES.contains(&p.template) {
+        return p.value("item").map(|i| ("item", i));
+    }
+    if matches!(p.category(), Category::Lore | Category::Warning) {
+        return p.value("monster").map(|m| ("monster", m));
+    }
+    None
+}
+
+fn subject_key(name: &str) -> String {
+    let words: Vec<String> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    format!("about_{}", words.join("_"))
+}
+
+fn subject_description(kind: &str, name: &str) -> String {
+    match kind {
+        "item" => format!(
+            "About {name} (an item): which monster drops it, where it is sold and for how much"
+        ),
+        _ => format!(
+            "About {name} (a monster): where it is, how strong it is, what it drops, how dangerous it is"
+        ),
+    }
+}
+
+pub fn group_options(groups: &[Group]) -> Vec<(String, String)> {
+    groups
+        .iter()
+        .map(|g| (g.key.clone(), g.description.clone()))
+        .collect()
+}
 
 /// A menu of sentences.
 pub struct Menu<'a> {
@@ -43,14 +143,9 @@ pub struct Walk<'a> {
 }
 
 impl<'a> Menu<'a> {
-    /// Walks the menu from the topics, or from inside `open` (already picked by the caller).
-    pub async fn walk(
-        &self,
-        s1: &SystemOne,
-        state: &str,
-        mut open: Option<&'static Topic>,
-    ) -> Result<Walk<'a>> {
-        let topics = topics_of(&self.phrases);
+    /// Walks the menu from the topics, or from inside the topic `open` (already picked by the caller).
+    pub async fn walk(&self, s1: &SystemOne, state: &str, open: Option<&str>) -> Result<Walk<'a>> {
+        let topics = groups(&self.phrases);
         let mut walk = Walk {
             picked: None,
             steps: Vec::new(),
@@ -59,33 +154,36 @@ impl<'a> Menu<'a> {
         if topics.is_empty() {
             return Ok(walk);
         }
-        // The topics gone back from, with their sentences
-        let mut left: Vec<(&Topic, Vec<&'a Phrase>)> = Vec::new();
+        let mut open = open.and_then(|k| topics.iter().position(|g| g.key == k));
+        // The topics gone back from, by index
+        let mut left: Vec<usize> = Vec::new();
         loop {
-            let topic = match open.take() {
-                Some(t) => t,
+            let at = match open.take() {
+                Some(i) => i,
                 None => {
-                    let mut options = topic_options(&topics);
+                    let mut options = group_options(&topics);
                     options.extend(self.extra.iter().cloned());
                     let view = format!("{state}\n\n{}", view(&topics, &left, None));
                     let key = self
                         .pick(s1, &view, &self.ask_topic, options, TOPIC_TEMPERATURE)
                         .await?;
-                    match topics.iter().find(|t| t.key == key) {
-                        Some(t) => *t,
+                    match topics.iter().position(|g| g.key == key) {
+                        Some(i) => i,
                         None if self.extra.iter().any(|(k, _)| *k == key) => {
                             walk.steps.push(key.clone());
                             walk.picked = Some(Picked::Extra(key));
                             return Ok(walk);
                         }
-                        None => topics[0],
+                        None => 0,
                     }
                 }
             };
-            walk.steps.push(topic.key.to_owned());
-            let of = of_topic(&self.phrases, topic);
+            let topic = &topics[at];
+            walk.steps.push(topic.key.clone());
+            let of = &topic.phrases;
             let can_back = left.len() < MAX_BACKS && topics.len() > 1;
             if of.len() == 1 && !can_back {
+                walk.steps.push(format!("\"{}\"", of[0].render()));
                 walk.picked = Some(Picked::Phrase(of[0]));
                 return Ok(walk);
             }
@@ -97,17 +195,17 @@ impl<'a> Menu<'a> {
             if can_back {
                 options.push((
                     BACK.into(),
-                    "Back: none of these fits, return to the topics".into(),
+                    "Back: none of these sentences fits the conversation; return to the topics and pick another".into(),
                 ));
             }
-            let view = format!("{state}\n\n{}", view(&topics, &left, Some(topic)));
+            let view = format!("{state}\n\n{}", view(&topics, &left, Some(at)));
             let key = self
                 .pick(s1, &view, &self.ask_sentence, options, SENTENCE_TEMPERATURE)
                 .await?;
             if key == BACK {
                 walk.steps.push(BACK.into());
                 walk.backs += 1;
-                left.push((topic, of));
+                left.push(at);
                 continue;
             }
             let phrase = key
@@ -145,32 +243,28 @@ impl<'a> Menu<'a> {
 
 /// The menu as the model reads it: the topics (the open one marked), then its history in this menu, numbered, with
 /// every Back it selected spelled out, and where it is now. The sentences of the open topic are the choices themselves.
-fn view(topics: &[&Topic], left: &[(&Topic, Vec<&Phrase>)], open: Option<&Topic>) -> String {
+fn view(topics: &[Group], left: &[usize], open: Option<usize>) -> String {
     let mut out = String::from("Menu of messages. Topics:");
-    for t in topics {
-        let mark = match open {
-            Some(o) if o.key == t.key => " <- open now",
-            _ if left.iter().any(|(l, _)| l.key == t.key) => " (you selected Back in it)",
-            _ => "",
+    for (i, t) in topics.iter().enumerate() {
+        let mark = if open == Some(i) {
+            " <- open now"
+        } else if left.contains(&i) {
+            " (you selected Back in it)"
+        } else {
+            ""
         };
-        out += &format!(
-            "
-- {}: {}{mark}",
-            t.key, t.description
-        );
+        out += &format!("\n- {}: {}{mark}", t.key, t.description);
     }
-    out += "
-Your history in this menu, oldest first:";
+    out += "\nYour history in this menu, oldest first:";
     let mut n = 0;
     let mut step = |out: &mut String, text: String| {
         n += 1;
-        *out += &format!(
-            "
-{n}. {text}"
-        );
+        *out += &format!("\n{n}. {text}");
     };
-    for (t, sentences) in left {
-        let seen: Vec<String> = sentences
+    for &i in left {
+        let t = &topics[i];
+        let seen: Vec<String> = t
+            .phrases
             .iter()
             .map(|p| format!("\"{}\"", p.render()))
             .collect();
@@ -191,7 +285,7 @@ Your history in this menu, oldest first:";
         );
     }
     let backs_left = MAX_BACKS.saturating_sub(left.len());
-    match open {
+    match open.map(|i| &topics[i]) {
         Some(t) if backs_left > 0 && topics.len() > 1 => step(
             &mut out,
             format!(
@@ -214,29 +308,6 @@ Your history in this menu, oldest first:";
     out
 }
 
-/// The topics that have a sentence among `phrases`, in catalogue order.
-pub fn topics_of(phrases: &[&Phrase]) -> Vec<&'static Topic> {
-    TOPICS
-        .iter()
-        .filter(|t| phrases.iter().any(|p| t.templates.contains(&p.template)))
-        .collect()
-}
-
-pub fn topic_options(topics: &[&Topic]) -> Vec<(String, String)> {
-    topics
-        .iter()
-        .map(|t| (t.key.to_owned(), t.description.to_owned()))
-        .collect()
-}
-
-fn of_topic<'a>(phrases: &[&'a Phrase], topic: &Topic) -> Vec<&'a Phrase> {
-    phrases
-        .iter()
-        .copied()
-        .filter(|p| topic.templates.contains(&p.template))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,48 +321,82 @@ mod tests {
             Phrase::new("bye", &[]),
         ];
         let phrases: Vec<&Phrase> = p.iter().collect();
-        let topics = topics_of(&phrases);
+        let topics = groups(&phrases);
         assert_eq!(
-            topics.iter().map(|t| t.key).collect::<Vec<_>>(),
-            ["greet", "answer", "bye"]
+            topics.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(),
+            ["greet", "accept", "decline", "bye"]
         );
-        let answer = topics[1];
-        let text = view(
-            &topics,
-            &[(answer, of_topic(&phrases, answer))],
-            Some(topics[2]),
-        );
+        let text = view(&topics, &[1], Some(3));
+        assert!(text.contains("- greet: Greet someone\n"), "{text}");
         assert!(
-            text.contains(
-                "- greet: Greet someone
-"
-            ),
+            text.lines()
+                .any(|l| l.starts_with("- accept: ") && l.ends_with(" (you selected Back in it)")),
             "{text}"
         );
-        assert!(text.contains("- answer: Answer a question or a request: yes, no, sure, not yet, maybe later, no idea, got it (you selected Back in it)"), "{text}");
         assert!(text.contains("- bye: Say goodbye <- open now"), "{text}");
         assert!(
-            text.contains("1. Opened the topic answer, which offered: \"Yes\", \"No\"."),
+            text.contains("1. Opened the topic accept, which offered: \"Yes\"."),
             "{text}"
         );
         assert!(
             text.contains(
-                "2. Selected Back: none of the sentences in answer fit. Returned to the topics."
+                "2. Selected Back: none of the sentences in accept fit. Returned to the topics."
             ),
             "{text}"
         );
-        assert!(text.ends_with("3. Opened the topic bye <- you are here. Pick one of its sentences, or Back to return to the topics (1 Back left)."), "{text}");
+        assert!(
+            text.ends_with("3. Opened the topic bye <- you are here. Pick one of its sentences, or Back to return to the topics (1 Back left)."),
+            "{text}"
+        );
         let fresh = view(&topics, &[], None);
         assert!(
-            fresh.ends_with(
-                "Your history in this menu, oldest first:
-1. At the topics <- you are here. Pick a topic."
-            ),
+            fresh.ends_with("Your history in this menu, oldest first:\n1. At the topics <- you are here. Pick a topic."),
             "{fresh}"
         );
     }
 
-    /// A decision model that selects Back whenever it may, else the first option (keys come sorted); the requests it got go to `seen`.
+    #[test]
+    fn what_the_bot_knows_about_a_monster_or_an_item_is_a_topic() {
+        let p = [
+            Phrase::new("mob_level", &["Fabre", "2"]),
+            Phrase::new("hits_hard", &["Fabre"]),
+            Phrase::new("lives_on", &["Fabre", "prt_fild05"]),
+            Phrase::new("here_now", &["Poring", "prt_fild08"]),
+            Phrase::new("price_on", &["Red Potion", "50", "prontera"]),
+            Phrase::new("dropped_by", &["Red Potion", "Poring"]),
+            Phrase::new("careful_on", &["prt_fild05"]),
+            Phrase::new("hello", &[]),
+        ];
+        let phrases: Vec<&Phrase> = p.iter().collect();
+        let topics = groups(&phrases);
+        let keys: Vec<&str> = topics.iter().map(|t| t.key.as_str()).collect();
+        // Poring has one sentence: it stays in monster_where
+        assert_eq!(
+            keys,
+            [
+                "greet",
+                "about_fabre",
+                "about_red_potion",
+                "monster_where",
+                "danger"
+            ]
+        );
+        assert_eq!(
+            topics[1].phrases.len(),
+            3,
+            "level, hits hard and where, all about Fabre"
+        );
+        assert!(topics[1].description.starts_with("About Fabre (a monster)"));
+        assert!(
+            topics[2]
+                .description
+                .starts_with("About Red Potion (an item)")
+        );
+        assert_eq!(topics[4].phrases[0].render(), "Careful on prt_fild05");
+    }
+
+    /// A decision model that selects Back whenever it may, else the first option (keys come sorted); the requests it
+    /// got go to `seen`.
     async fn backward_model(
         seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     ) -> String {
@@ -358,6 +463,7 @@ mod tests {
         let p = [
             Phrase::new("hello", &[]),
             Phrase::new("yes", &[]),
+            Phrase::new("sure", &[]),
             Phrase::new("no", &[]),
             Phrase::new("bye", &[]),
         ];
@@ -372,19 +478,19 @@ mod tests {
         assert_eq!(walk.backs, MAX_BACKS);
         assert_eq!(
             walk.steps,
-            ["answer", "back", "answer", "back", "answer", "\"Yes\""]
+            ["accept", "back", "accept", "back", "accept", "\"Yes\""]
         );
         assert_eq!(walk.picked, Some(Picked::Phrase(&p[1])));
         let seen = seen.lock().unwrap();
-        // The last request: in answer (the first key) with no Back left, and both Backs in its history
+        // The last request: in accept (the first key) with no Back left, and both Backs in its history
         let last = seen.last().unwrap();
         let state = last["state"].as_str().unwrap();
         assert!(
-            state.contains("2. Selected Back: none of the sentences in answer fit."),
+            state.contains("2. Selected Back: none of the sentences in accept fit."),
             "{state}"
         );
         assert!(
-            state.contains("4. Selected Back: none of the sentences in answer fit."),
+            state.contains("4. Selected Back: none of the sentences in accept fit."),
             "{state}"
         );
         assert!(state.contains("No Back left"), "{state}");

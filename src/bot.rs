@@ -68,9 +68,37 @@ pub struct Bot {
     pub travel_spot: Option<(String, (u16, u16))>,
     /// The lines of the last conversation.
     pub last_dialog: Vec<String>,
+    /// Maps the bot died crossing, and when: routes and hunting grounds keep off them for a while.
+    pub deadly_ways: Vec<(String, Instant)>,
+    /// The warps walked to that the bot stepped off by mistake (`Edge::key`), and when: a trip avoids one stepped off
+    /// twice within `STRAY_MEMORY`, however many trips it takes.
+    pub stray_edges: Vec<(String, Instant)>,
 }
 
 impl Bot {
+    /// The maps the bot died crossing within `DEADLY_WAY_MEMORY`.
+    pub fn recent_deadly_ways(&self) -> Vec<String> {
+        self.deadly_ways
+            .iter()
+            .filter(|(_, at)| at.elapsed() < crate::behaviors::travel::DEADLY_WAY_MEMORY)
+            .map(|(map, _)| map.clone())
+            .collect()
+    }
+
+    /// The bot heals its party members: the healer's role in a party, as an Acolyte or Priest.
+    pub fn can_heal(&self, obs: &Observation) -> bool {
+        use crate::party::Role;
+        obs.party.is_some()
+            && self
+                .party
+                .as_ref()
+                .is_some_and(|p| p.role(&obs.me.job) == Role::Healer)
+            && Role::Healer
+                .jobs()
+                .iter()
+                .any(|j| j.eq_ignore_ascii_case(&obs.me.job))
+    }
+
     pub fn new(
         api: BotApi,
         name: String,
@@ -101,6 +129,8 @@ impl Bot {
             last_craft: None,
             travel_spot: None,
             last_dialog: Vec::new(),
+            deadly_ways: Vec::new(),
+            stray_edges: Vec::new(),
         }
     }
 

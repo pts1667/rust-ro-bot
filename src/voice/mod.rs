@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use crate::strategist::llm::Llm;
 use known::Known;
-use menu::{Menu, Picked, topic_options, topics_of};
+use menu::{Menu, Picked, group_options, groups};
 use phrase::{CONJUNCTIONS, Category, Phrase, conjunction_description, join};
 use systemone::{Question, SystemOne};
 
@@ -134,7 +134,7 @@ pub async fn compose(
                 )
         })
         .collect();
-    let rest_topics = topics_of(&rest);
+    let rest_topics = groups(&rest);
     if rest_topics.is_empty() || first.category() == Category::Farewell {
         return Ok(Some(Message::built(first.render())));
     }
@@ -153,7 +153,7 @@ pub async fn compose(
                     "topic",
                     Question::choice(
                         format!("What would a second sentence be about, to {purpose}?"),
-                        topic_options(&rest_topics),
+                        group_options(&rest_topics),
                     ),
                 ),
             ],
@@ -163,7 +163,7 @@ pub async fn compose(
     let topic = answers
         .get("topic")
         .and_then(|a| a.sample(TOPIC_TEMPERATURE))
-        .and_then(|k| rest_topics.iter().find(|t| t.key == k).copied());
+        .filter(|k| rest_topics.iter().any(|t| t.key == *k));
     let Some(topic) = topic.filter(|_| more >= MORE_GATE) else {
         return Ok(Some(Message::built(first.render())));
     };
@@ -174,7 +174,7 @@ pub async fn compose(
         ask_sentence: format!("Which sentence would come next, to {purpose}?"),
         best: false,
     };
-    let walk = menu.walk(s1, &so_far, Some(topic)).await?;
+    let walk = menu.walk(s1, &so_far, Some(topic.as_str())).await?;
     tracing::debug!(target: "voice", steps = %walk.steps.join(" > "), "second sentence");
     let Some(Picked::Phrase(second)) = walk.picked else {
         return Ok(Some(Message::built(first.render())));

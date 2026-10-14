@@ -76,6 +76,18 @@ only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warp
 exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multiple of max HP), `rest`, and
 `explore:<map>` (up to 2 unvisited maps within 2 warps).
 
+- Hunting grounds count the warps of a way that crosses no deadly map (`safe_hops`: an aggressive monster with 5 or
+  more spawns that kills the bot in two hits), and a ground with no such way is not offered. mjo_dun01 used to show
+  "threat 0%" while the only way in crosses mjolnir_02 (Flora, Petite): five deaths in one run. Maps the bot died
+  crossing in the last 30 minutes are left out of its routes and grounds (`Bot::deadly_ways`), and dying on the way
+  gives the goal up at once.
+- A party leader picks grounds for its weakest member in the game: its own fight model scaled to that member's level
+  (`party_fighter`).
+- First job: a Novice without a `job_target` (and no party role) gets one at random among the jobs its stats still
+  suit (any while they are as created; else those of its build, e.g. Swordman, Merchant or Thief for melee), and the
+  build follows a job taken while the stats are fresh. Before, every bot kept the default melee build and became a
+  Swordman; asked, the decision model picked Swordman 7 times in 10.
+
 ### Parties (party/)
 
 A bot knows its party only as a player does: the party window (members, their map, and on the same map their position
@@ -103,7 +115,9 @@ them another way.
 - A member follows the leader (or whoever said `follow me`): to its map with the travel behaviour, then within 7 cells.
   It fights, in order: a monster attacking a member, what the leader hits (its sprite shows it), the best target within
   10 cells of the leader. Errands (sell, buy potions, job change, leaving the training grounds) still run as planned,
-  announced with `brb`. A leader away on an errand is not followed.
+  announced with `brb`. A leader away on an errand is not followed. Nor is one more than 6 warps away, or only
+  reachable through a deadly map, or on a deadly map: the member plays by itself meanwhile (checked every 2 minutes).
+  Members used to go 30 warps after a leader in Rachel, and 15 died on the way in one run.
 - Every bot, solo or not, leaves monsters to other players: one that attacks an outsider or that an outsider hits is
   not a target. A monster that attacks a member is worth 4x as a target. The leader does not pull more while a member
   in sight is below 30% HP with nothing attacking it.
@@ -138,7 +152,15 @@ them another way.
 - Interior maps hold several rooms (`geffen_in`), and some fields have closed-off parts (`prt_fild04`): a warp the bot
   cannot get to is refused with `No reachable cell from where target … can be used`. That warp is skipped for the trip
   only, not recorded. Into the shop's map, travel takes the warp landing nearest to the shop.
-- `arrivals` also list NPC transports; only warps the other map lists count as real.
+- `arrivals` also list NPC transports; only warps the other map lists count as real. `transports` lists the NPCs that
+  send a character somewhere, with `checks` when there is a condition: no way back is guessed to a map such an NPC
+  leads to (the Culvert). A warper's `to` is a link (`"/db/destinations"`), not a list: parsed strictly, it made every
+  town with a warper drop out of the graph.
+- The server goes around other warps' cells on a walk its pathfinder finds (100 steps), but walks a longer one in legs
+  found over the whole map, through door cells (`way_around_warps` returns `None` when the direct path is empty).
+  Out of an `alberta_in` door at (102,153), the walk to the `pay_fild03` exit went back in at once, 2840 times in one
+  run. Travel now walks short legs (10 cells) toward the warp while another warp is within 12 cells, and a walk that
+  ends on another map than planned counts as a failure (4 a trip at most).
 - `@go <town>` is allowed for bots (`bots.command_group`). `@go morroc` lands on `old_moc`, `novice` on the training
   grounds. Travel uses it once a trip, when there is no route or it is stuck, to the town with the fewest real warps
   to the destination (searched backwards through `arrivals`); no such town, no `@go`.
@@ -346,29 +368,76 @@ of the goal choices, and notes. `--voice llm` is the default and unchanged. One 
   sharper for the topic and the conjunction. A yes/no gate alone was unreliable in chat (silence to questions, an
   answer to "bye"); there "say nothing" is a choice next to the topics instead. Walks are logged at `voice=debug`
   (`steps=bye > back > items > "Fabre drops Fluff"`).
-- Topics (`phrase::TOPICS`, 14, each with a description for the model) group the spoken templates more finely than
-  the kinds (greet, answer, react, where monsters are, how strong, items, danger, my level, my maps, my fights, my
-  errands, ask for information, ask for help, bye); the kinds stay for the code's rules (no greeting, reply or
+- Topics (`phrase::TOPICS`, 22, each with a description for the model) group the spoken templates more finely than
+  the kinds (greet, accept, decline, cheer, comfort, thank, clarify, where monsters are, how strong, items, danger, my level,
+  my maps, my fights, shopping, errands, status, plans, party, ask for information, ask for help, bye); the kinds stay for the code's rules (no greeting, reply or
   farewell as a second sentence, `COMMENT_KINDS`). Compared live on 24 chat lines with their right answers
   (`cargo test voice_eval -- --ignored --nocapture`, 63 sentences, 2026-10-14, the server busy with a 50-bot run):
 
   | First pick | Expected right (probability mass) | Top path right | ms per message |
   |---|---|---|---|
-  | one flat choice over every sentence | 52% | 21/24 | 824 |
-  | the 7 kinds, then a sentence | 48% | 16/24 | 916 |
-  | the 14 topics, then a sentence | 66% | 22/24 | 698 |
+  | one flat choice over every sentence | 56% | 22/24 | 835 |
+  | the 7 kinds, then a sentence | 51% | 18/24 | 717 |
+  | the 14 topics, then a sentence | 70% | 23/24 | 714 |
 
   The kinds lost on "news" (23 templates): "I just reached level 10!" and "I love this game" went to it. The topic
-  descriptions were sharpened once against this set (sympathy under react, "the ones around you now", what you
-  bought or wear), so the topic numbers are a little optimistic. Still wrong everywhere: "what's your job level?"
-  gets "I'm a level 9 Novice"; "argh, I died again" gets no sympathy. More templates can go into the topics: the
-  second call only sees its topic's sentences (12 at most now).
+  descriptions were sharpened against this set (sympathy under react, "the ones around you now", what you bought
+  or wear, ask_help as "a request of your own, not a reply to theirs"), so the topic numbers are a little
+  optimistic. "What's your job level?" got "I'm a level 9 Novice" everywhere until the state said the job level
+  (`Known::about`: "level 9 Novice (job level 7)"): every fact a sentence states must be in the state, or the model
+  will not pick it. More templates can go into the topics: the second call only sees its topic's sentences (12 at
+  most now).
 
-  The menu with Back, in the same eval at the model's best picks: 22/24 end right (as the topics' top path; one
-  more step per message, ~1 s), and no Back was taken from a topic that fit. Started inside a wrong topic on purpose
-  (6 cases: "what does Fabre drop?" in bye, "what level are you?" in danger, ...), it selected Back in 6/6 and ended
-  right in 6/6 (`bye > back > items > "Fabre drops Fluff"`).
-- The catalogue has 94 templates (2026-10-14; 7 of them lessons): replies (not yet, maybe later, no problem, ...), lore from the reference
+  The menu with Back, in the same eval at the model's best picks: 24/24 end right (~1 s per message), and no Back
+  was taken from a topic that fit. Started inside a wrong topic on purpose (6 cases: "what does Fabre drop?" in bye,
+  "what level are you?" in danger, ...), it selected Back in 6/6 and ended right in 6/6 (`bye > back > items >
+  "Fabre drops Fluff"`). With Back described as "none of these fits, return to the topics" it stayed in my_maps for
+  "ok, I have to go now, bye" (5/6); "none of these sentences fits the conversation; return to the topics and pick
+  another" fixed it. Echoes are the menu's typical miss: "can you wait for me?" answered with "Wait for me" (the
+  request topic) until ask_help said it is the bot's own request.
+
+  Then 32 templates were added at once (sympathy, cheering, "what about you?", busy, clarify, a monster near or far
+  above the bot's level, "no X here", what it fights now, status: HP, weight, zeny, points; plans: next job and the
+  job level it needs, what it goes to buy; party: following the leader, hunting with, resting, healing), with the
+  facts they need in `Known` (and in the state: "HP 30%, weight 55%, 1234 zeny, 2 skill points...", job target,
+  party leader). The eval grew to 40 lines (16 for the new templates), 98 sentences for its bot:
+
+  | First pick | Expected right | Top path right | ms per message |
+  |---|---|---|---|
+  | one flat choice over every sentence | 44% | 34/40 | 1242 |
+  | the 7 kinds, then a sentence | 39% | 26/40 | 1028 |
+  | the 20 topics, then a sentence | 60% | 33/40 | 841 |
+  | the menu (topics, sentences, Back) | | 36/40 | 1420 |
+
+  Started in a wrong topic: Back in 5/6, ended right in 4/6. With 18 topics first (react as one topic of 18
+  sentences) the menu ended right in 33/40 ("argh, I died again" got "Welcome back!"); react became cheer, comfort
+  and thank. Still wrong: "ok, I have to go now, bye" gets "You too!"; "go there and wait" gets "I'll follow you"
+  instead of asking which map; "when can you change job?" gets "Level 9 now!" (my_level, not plans); "what are you
+  fighting?" gets "Killed 55 monsters so far". The flat choice keeps up on the top pick (34/40) but spreads its
+  probability thin and gets slower with every template (~28 tokens each).
+
+  Next: answer split into accept and decline, my_errands into shopping and errands, and subjects: the lore and
+  warnings about one monster or item make a topic of their own ("about_fabre: About Fabre (a monster): where it is,
+  how strong it is, what it drops, how dangerous it is") once there are 2 sentences about it (`menu::groups`), so
+  lore stays small however much the bot knows. The eval now grades two tiers per line: best, and fine (true and an
+  answer to the line, e.g. "I'll follow you" to "go there and wait"); "right" counts both. 21 topics for the eval's
+  bot (about_fabre, about_poison_spore among them):
+
+  | First pick | Expected right | Top path right (best) | ms per message |
+  |---|---|---|---|
+  | one flat choice over every sentence | 47% | 36/40 (33) | 1247 |
+  | the 7 kinds, then a sentence | 43% | 28/40 (24) | 962 |
+  | the 21 topics, then a sentence | 64% | 35/40 (31) | 918 |
+  | the menu (topics, sentences, Back) | | 36/40 (31) | 1492 |
+
+  Started in a wrong topic: Back in 4/6. It never left a subject topic: in about_fabre for "hi Elara!" it said "Watch
+  out for Fabre", in about_poison_spore for "where are you hunting?" "Poison Spore is way above me"; a subject holds
+  sentences of every kind, so one always seems to fit. Topic keys are read as words: a topic named "busy" took "are
+  you busy?" and "your bag looks full" ("Low on potions"); renamed errands. Misses left: "is prt_fild08 a good
+  map?" gets the question back ("Is prt_fild08 good for a level 9?", ask_info, even described as "a question of
+  your own, not a reply to theirs"), "your bag looks full" gets "Low on potions", "any Poison Spores near you?"
+  gets "Not yet", "what are you fighting?" gets "Killed 55 monsters so far".
+- The catalogue has 126 templates (2026-10-14; 7 of them lessons): replies (not yet, maybe later, no problem, ...), lore from the reference
   (a monster's level, HP, passive or not, the maps with lots of it, an item's price on a map), warnings (hits hard,
   don't fight alone, careful on a map, died to X on a map), news from the journal, goal and counters (level and job
   level, first visits, buying, selling, resting, exploring, heading for a job, gear bought or worn, kills and deaths so
@@ -443,4 +512,6 @@ Still open:
   LLM bots, the next-job gear filter.
 
 - Bad warps are learned per character (could be shared).
+- Server: `way_around_warps` (rust-ro `server/src/server/bots/command.rs`) could route long walks over the masked
+  cells too; the bot's short legs work around it meanwhile.
 - Storage, pets, vending and the WebSocket API are out of scope for now.

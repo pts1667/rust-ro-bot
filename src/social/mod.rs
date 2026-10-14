@@ -700,6 +700,18 @@ impl Bot {
             newcomers: Vec::new(),
             lore,
             notes: self.memory.strategy.notes.clone(),
+            hp_frac: if obs.me.max_hp == 0 {
+                0.0
+            } else {
+                obs.me.hp as f32 / obs.me.max_hp as f32
+            },
+            weight_frac: obs.me.weight as f32 / obs.me.max_weight.max(1) as f32,
+            zeny: obs.me.zeny,
+            skill_points: obs.me.skill_points,
+            status_points: obs.me.status_points,
+            job_target: self.memory.strategy.job_target.clone(),
+            leader: obs.party.as_ref().and_then(|p| p.leader.clone()),
+            can_heal: self.can_heal(obs),
         }
     }
 

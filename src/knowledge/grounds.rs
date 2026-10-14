@@ -105,13 +105,28 @@ pub fn is_hunting_map_name(name: &str) -> bool {
     !SKIP.iter().any(|s| name.contains(s))
 }
 
+/// Spawns of a monster on a map, at least, for it to make crossing the map deadly.
+const LETHAL_MIN_SPAWNS: u32 = 5;
+
 /// An aggressive monster of `map` that kills the bot in two hits, if any: crossing the map is a gamble.
 pub async fn lethal_monster(db: &Db, map: &str, fighter: &Fighter) -> Option<String> {
     let data = db.map(map).await.ok()?;
+    let mut amounts: Vec<(u32, u32)> = Vec::new();
     for spawn in &data.mob_spawns {
         let Some(id) = spawn.mob.id_u32() else {
             continue;
         };
+        match amounts.iter_mut().find(|(m, _)| *m == id) {
+            Some((_, n)) => *n += spawn.amount,
+            None => amounts.push((id, spawn.amount)),
+        }
+    }
+    for (id, amount) in amounts {
+        // A lone monster on a whole field is rarely met on the way: the Orc Hero, Choco and High Orc of gef_fild02
+        // and 03 cut Geffen off from Prontera's fields. Those that killed bots on the way had 20 or more.
+        if amount < LETHAL_MIN_SPAWNS {
+            continue;
+        }
         let Ok(mob) = db.mob(id).await else { continue };
         if mob.aggressive() && fighter.lethal_in_two(&mob) {
             return Some(mob.name_english);
@@ -245,7 +260,8 @@ pub async fn farm_ground(
     Ok(best.map(|(_, g, m)| (g, m)))
 }
 
-/// The best grounds within `max_hops` warps of `from`.
+/// The best grounds within `max_hops` warps of `from`, on a way that crosses no deadly map (`safe_hops`): the score
+/// of mjo_dun01 said threat 0%, and five bots died on mjolnir_02 on the way.
 pub async fn hunting_grounds(
     db: &Db,
     graph: &WorldGraph,
@@ -257,7 +273,8 @@ pub async fn hunting_grounds(
     limit: usize,
 ) -> Result<Vec<Ground>> {
     let mut grounds = Vec::new();
-    for (name, hops) in graph.neighbourhood(from, max_hops).await? {
+    let mut lethal = HashMap::new();
+    for (name, _) in graph.neighbourhood(from, max_hops).await? {
         if avoid_maps.contains(&name) || !is_hunting_map_name(&name) {
             continue;
         }
@@ -271,6 +288,14 @@ pub async fn hunting_grounds(
                 .iter()
                 .any(|f| f == "pvp" || f == "gvg" || f == "battleground")
         {
+            continue;
+        }
+        let Some(hops) =
+            safe_hops(db, graph, fighter, from, &name, avoid_maps, &mut lethal).await?
+        else {
+            continue;
+        };
+        if hops > max_hops {
             continue;
         }
         let mut mobs = Vec::new();

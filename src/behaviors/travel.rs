@@ -1,6 +1,7 @@
 //! Walking from map to map along the warp graph, and leaving the training grounds.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -58,6 +59,49 @@ pub const GO_TOWNS: &[&str] = &[
 const GO_SEARCH_HOPS: u32 = 6;
 /// Start of the failure reason of a warp in another part of the map (another room of an interior map).
 const UNREACHABLE: &str = "unreachable from here";
+/// Start of the failure reason of a walk that ended on another warp than the one it went for.
+const STRAY: &str = "stepped on another warp";
+/// Other warps stepped on by mistake in one trip before giving up: a walk that crosses a door keeps going in.
+const MAX_STRAYS: usize = 4;
+/// How long a warp stepped off by mistake stays out of the routes of trips, once it was stepped off twice.
+pub const STRAY_MEMORY: Duration = Duration::from_secs(10 * 60);
+/// Times a walk to a warp landed on another map, within `STRAY_MEMORY`, after which the trips leave that warp out.
+const STRAYS_TO_AVOID: usize = 2;
+/// How long a map the bot died crossing stays out of its routes and hunting grounds.
+pub const DEADLY_WAY_MEMORY: Duration = Duration::from_secs(30 * 60);
+/// A walk to a warp this far or further is a long one: the server walks it in legs found over the whole map, which go
+/// through other warps' cells, while it takes a shorter walk around them.
+const SHORT_WALK: u32 = 10;
+/// Another warp this near makes the start of a long walk go in short legs first.
+const WARP_NEAR: u32 = 12;
+/// Short legs at most before the long walk.
+const MAX_CLEAR_LEGS: usize = 4;
+
+/// The cell `len` steps from `from` toward `to`, in the eight directions of a walk.
+pub fn leg_toward(from: (u16, u16), to: (u16, u16), len: u16) -> (u16, u16) {
+    let step = |a: u16, b: u16| {
+        if b > a {
+            a + (b - a).min(len)
+        } else {
+            a - (a - b).min(len)
+        }
+    };
+    (step(from.0, to.0), step(from.1, to.1))
+}
+
+/// The warps that a walk kept landing off, `STRAYS_TO_AVOID` times or more within `STRAY_MEMORY`: a trip leaves them out.
+/// A party member following its leader through a door next to a town's warp went round it 4,470 times in one run.
+fn avoided_strays(edges: &[(String, Instant)]) -> HashSet<String> {
+    let mut count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (key, _) in edges.iter().filter(|(_, at)| at.elapsed() < STRAY_MEMORY) {
+        *count.entry(key.as_str()).or_default() += 1;
+    }
+    count
+        .into_iter()
+        .filter(|(_, times)| *times >= STRAYS_TO_AVOID)
+        .map(|(key, _)| key.to_owned())
+        .collect()
+}
 
 /// How a guarded walk to a warp ended.
 enum Walk {
@@ -250,8 +294,10 @@ impl Bot {
         let mut failures = 0;
         // `@go` is the way out of a map the graph cannot leave (guards instead of warps, wrong guesses), once a trip.
         let mut went = false;
-        // Warps in another room than the bot's, left out for this trip only.
-        let mut skip: HashSet<String> = HashSet::new();
+        // Warps in another room than the bot's, left out for this trip only; and those a walk kept landing off.
+        self.stray_edges
+            .retain(|(_, at)| at.elapsed() < STRAY_MEMORY);
+        let mut skip = avoided_strays(&self.stray_edges);
         // Interior maps are several rooms: into the shop's map, take the warp that lands nearest to the shop.
         let near = match &self.travel_spot {
             Some((map, spot)) if map == target => Some(*spot),
@@ -265,6 +311,16 @@ impl Bot {
         // Maps on the way with an aggressive monster that kills in two hits, avoided when another way exists.
         let mut deadly: HashSet<String> = HashSet::new();
         let mut checked: HashSet<String> = HashSet::new();
+        // Maps the bot died crossing lately, unless it goes there
+        self.deadly_ways
+            .retain(|(_, at)| at.elapsed() < DEADLY_WAY_MEMORY);
+        for (map, _) in &self.deadly_ways {
+            if map != target {
+                deadly.insert(map.clone());
+                checked.insert(map.clone());
+            }
+        }
+        let mut strays = 0;
         let fighter = self.knowledge.fighter(&self.observe().await?).await?;
         for _ in 0..MAX_LEGS {
             if self.preempted() {
@@ -348,6 +404,16 @@ impl Bot {
                     tracing::info!(%reason, "warp in another part of the map, trying another");
                     skip.insert(edge.key());
                 }
+                // On another map than planned: the next leg starts from there, and walks go around that warp now
+                Outcome::Failed(reason) if reason.starts_with(STRAY) => {
+                    strays += 1;
+                    self.stray_edges.push((edge.key(), Instant::now()));
+                    if strays >= MAX_STRAYS {
+                        return Ok(Outcome::failed(format!(
+                            "kept stepping on other warps on the way to {target}: {reason}"
+                        )));
+                    }
+                }
                 Outcome::Failed(reason) => {
                     failures += 1;
                     tracing::warn!(%reason, "warp failed");
@@ -371,9 +437,80 @@ impl Bot {
         )))
     }
 
+    /// Steps on the warp of `edge`, from the map the bot is on, around the warps it stepped on by mistake before. A
+    /// walk that ends on another map than the edge's is a failure: the warp it crossed is kept, to go around it.
+    async fn take_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
+        let from = obs.map.name.clone();
+        if edge.to != from
+            && let Some(outcome) = self.clear_of_warps(obs, edge).await?
+        {
+            return Ok(outcome);
+        }
+        let obs = &self.observe().await?;
+        let outcome = if obs.map.name == from {
+            self.step_on_warp(obs, edge).await?
+        } else {
+            Outcome::Done
+        };
+        if !matches!(outcome, Outcome::Done) || edge.to == from {
+            return Ok(outcome);
+        }
+        let now = self.observe().await?;
+        if now.map.name == from || now.map.name == edge.to {
+            return Ok(outcome);
+        }
+        tracing::info!(on = %from, landed = %now.map.name, wanted = %edge.to, "stepped on another warp on the way");
+        Ok(Outcome::failed(format!(
+            "{STRAY}: the warp to {} on {from}, going to {}",
+            now.map.name, edge.to
+        )))
+    }
+
+    /// Before a long walk to the warp of `edge`, short legs toward it while another warp is near: out of an alberta_in
+    /// door, the walk to the pay_fild03 exit went back in at once, 2840 times. `Some` when a leg ended the step: the
+    /// bot died or a new goal came. A leg that crosses a warp after all leaves the bot on the other map, for
+    /// `take_warp` to tell.
+    async fn clear_of_warps(&mut self, obs: &Observation, edge: &Edge) -> Result<Option<Outcome>> {
+        let from = obs.map.name.clone();
+        let goal = matching_warp(obs, edge).map_or((edge.x, edge.y), |w| (w.x, w.y));
+        let mut obs = obs.clone();
+        for _ in 0..MAX_CLEAR_LEGS {
+            let at = obs.pos();
+            let near = obs
+                .warps
+                .iter()
+                .any(|w| w.to_map != edge.to && dist((w.x, w.y), at) <= WARP_NEAR);
+            if obs.map.name != from || !near || dist(at, goal) <= SHORT_WALK + WARP_NEAR {
+                break;
+            }
+            let (x, y) = leg_toward(at, goal, SHORT_WALK as u16);
+            tracing::debug!(on = %from, x, y, "a short leg away from the warps near by");
+            let (api, name) = (self.api.clone(), self.name.clone());
+            let action = Action::Move { x, y, wait: true };
+            let walk = tokio::spawn(async move { api.act(&name, &action).await });
+            match self.guard_walk(&from, walk, true).await?.0 {
+                Walk::MapChanged => break,
+                Walk::Preempted => return Ok(Some(Outcome::Preempted)),
+                Walk::Dead { attacker } => return Ok(Some(self.died_on_the_way(&from, attacker))),
+                Walk::FightBack { target, name } => {
+                    if let Outcome::Failed(reason) = self.fight(target, &name).await?
+                        && self.observe().await?.me.dead
+                    {
+                        return Ok(Some(Outcome::Failed(reason)));
+                    }
+                }
+                // A cell it cannot stand on: the rest of the way in one walk, as before
+                Walk::Ended(Err(_)) => break,
+                Walk::Ended(Ok(_)) => {}
+            }
+            obs = self.observe().await?;
+        }
+        Ok(None)
+    }
+
     /// Steps on the warp of `edge`, from the map the bot is on. Attacked on the way, it fights back what it can beat
     /// and flees from the rest: walking on to the warp leaves the monster behind.
-    async fn take_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
+    async fn step_on_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
         let from = obs.map.name.clone();
         // A warp inside the map lands on another part of it, not another map
         let (inner, start_region) = (edge.to == from, obs.me.region);
@@ -596,6 +733,8 @@ impl Bot {
             .or_default() += 1;
         self.memory
             .note(format!("died to {cause} on the way through {map}"));
+        self.deadly_ways.retain(|(m, _)| m != map);
+        self.deadly_ways.push((map.to_owned(), Instant::now()));
         Outcome::failed(format!("died on the way through {map} ({cause})"))
     }
 
@@ -665,7 +804,29 @@ impl Bot {
 
 #[cfg(test)]
 mod tests {
-    use super::first_door;
+    use super::{avoided_strays, first_door, leg_toward};
+
+    #[test]
+    fn a_warp_kept_landed_off_is_avoided_by_the_trips() {
+        let now = std::time::Instant::now();
+        let edges = vec![
+            ("a".to_owned(), now),
+            ("b".to_owned(), now),
+            ("a".to_owned(), now),
+        ];
+        assert_eq!(
+            avoided_strays(&edges),
+            std::collections::HashSet::from(["a".to_owned()])
+        );
+        assert!(avoided_strays(&edges[..2]).is_empty());
+    }
+
+    #[test]
+    fn a_leg_goes_part_of_the_way() {
+        assert_eq!(leg_toward((102, 153), (15, 234), 10), (92, 163));
+        assert_eq!(leg_toward((102, 153), (105, 140), 10), (105, 143));
+        assert_eq!(leg_toward((5, 5), (5, 5), 10), (5, 5));
+    }
 
     #[test]
     fn the_first_door_leads_on_the_shortest_way_between_rooms() {

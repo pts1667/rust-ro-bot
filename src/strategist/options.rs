@@ -7,12 +7,14 @@ use anyhow::Result;
 
 use super::Snapshot;
 use super::skill_state::StrategicState;
+use crate::api::Observation;
 use crate::behaviors::gear::gear_budget;
 use crate::behaviors::quest::{awake, stage_place};
 use crate::goap::Goal;
 use crate::goap::goals::HelpTask;
 use crate::goap::state::{HEAL_STOCK_MIN, HEAL_STOCK_WANTED, arrow_count, next_jobs};
 use crate::knowledge::Knowledge;
+use crate::knowledge::combat::Fighter;
 use crate::knowledge::gear::Slot;
 use crate::knowledge::grounds::{farm_ground, hunting_grounds, is_hunting_map_name};
 use crate::party::recruit::MAX_MEMBERS;
@@ -275,8 +277,13 @@ async fn game_options(
     }
 
     out.extend(quest_opts);
-    let fighter = knowledge.fighter(&snap.obs).await?;
-    let avoid_maps: HashSet<String> = state.avoid_maps.iter().cloned().collect();
+    let fighter = party_fighter(knowledge.fighter(&snap.obs).await?, &snap.obs);
+    let avoid_maps: HashSet<String> = state
+        .avoid_maps
+        .iter()
+        .chain(snap.deadly_ways.iter())
+        .cloned()
+        .collect();
     let avoid_mobs: HashSet<String> = state
         .avoided_mobs(snap.obs.me.base_level)
         .into_iter()
@@ -611,6 +618,40 @@ async fn gather_option(
         }
     }
     Ok(None)
+}
+
+/// The fighter a party leader picks hunting grounds for: itself brought down to the level of its weakest member in the
+/// game, so that the members it leads live where it hunts and on the way there. A leader of level 22 took a party
+/// down to level 7 to Rachel. The members' gear is unknown: only the level, HP and stats scale.
+pub fn party_fighter(me: Fighter, obs: &Observation) -> Fighter {
+    let Some(party) = &obs.party else {
+        return me;
+    };
+    if party.leader.as_deref() != Some(obs.me.name.as_str()) {
+        return me;
+    }
+    let Some(low) = party
+        .members
+        .iter()
+        .filter(|m| m.online && m.name != obs.me.name)
+        .filter_map(|m| m.base_level)
+        .min()
+        .filter(|low| *low < me.level)
+    else {
+        return me;
+    };
+    let ratio = low as f32 / me.level.max(1) as f32;
+    let scale = |v: u32| ((v as f32 * ratio).round() as u32).max(1);
+    Fighter {
+        level: low,
+        max_hp: scale(me.max_hp),
+        str: scale(me.str),
+        agi: scale(me.agi),
+        vit: scale(me.vit),
+        dex: scale(me.dex),
+        luk: scale(me.luk),
+        ..me
+    }
 }
 
 /// Healing carried, in multiples of the max HP.

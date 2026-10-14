@@ -9,6 +9,12 @@ use crate::strategist::skill_state::job_path;
 
 /// Sentences offered per category, at most.
 const PER_CATEGORY: usize = 40;
+/// A monster this many levels from the bot's is "about my level", this many above "way above me".
+const SAME_LEVELS: u32 = 3;
+const ABOVE_LEVELS: u32 = 10;
+/// HP share under which the bot is low on HP, weight share from which it is too heavy (no more regeneration).
+const LOW_HP: f32 = 0.4;
+const HEAVY: f32 = 0.5;
 /// Spawns of a monster on a map that make "lots of" it there.
 const LOTS: u32 = 20;
 /// Kills of a monster without a death to it that make it easy.
@@ -52,6 +58,18 @@ pub struct Known {
     /// What the reference says about the names in what the bot read or heard.
     pub lore: Vec<Lore>,
     pub notes: Vec<String>,
+    /// HP and weight, as shares of their maximum.
+    pub hp_frac: f32,
+    pub weight_frac: f32,
+    pub zeny: u64,
+    pub skill_points: u32,
+    pub status_points: u32,
+    /// The job the strategist aims for (Σ).
+    pub job_target: Option<String>,
+    /// The leader of the bot's party.
+    pub leader: Option<String>,
+    /// The bot heals its party (the healer's role, as an Acolyte or Priest).
+    pub can_heal: bool,
 }
 
 impl Known {
@@ -86,6 +104,14 @@ impl Known {
             party: party_of(&snap.obs),
             low_potions: snap.heal_items < 3,
             notes: snap.notes.clone(),
+            hp_frac: frac(me.hp, me.max_hp),
+            weight_frac: snap.weight_frac,
+            zeny: me.zeny,
+            skill_points: me.skill_points,
+            status_points: me.status_points,
+            job_target: snap.job_target.clone(),
+            leader: snap.obs.party.as_ref().and_then(|p| p.leader.clone()),
+            can_heal: snap.can_heal,
             ..Default::default()
         }
     }
@@ -97,8 +123,13 @@ impl Known {
         } else {
             format!(", now: {}", self.doing)
         };
+        let job_level = if self.job_level > 0 {
+            format!(" (job level {})", self.job_level)
+        } else {
+            String::new()
+        };
         format!(
-            "{} is a level {} {} on {}{doing}.",
+            "{} is a level {} {}{job_level} on {}{doing}.",
             self.me, self.level, self.job, self.map
         )
     }
@@ -121,6 +152,30 @@ impl Known {
         }
         if !self.in_sight.is_empty() {
             lines.push(format!("Monsters in sight: {}.", self.in_sight.join(", ")));
+        }
+        lines.push(format!(
+            "HP {:.0}%, weight {:.0}%, {} zeny, {} skill points and {} stat points to spend{}.",
+            self.hp_frac * 100.0,
+            self.weight_frac * 100.0,
+            self.zeny,
+            self.skill_points,
+            self.status_points,
+            if self.low_potions {
+                ", low on potions"
+            } else {
+                ""
+            }
+        ));
+        if let Some(job) = &self.job_target {
+            lines.push(format!("Job target: {job}."));
+        }
+        if let Some(members) = &self.party {
+            let leader = self
+                .leader
+                .as_deref()
+                .map(|l| format!(" (leader: {l})"))
+                .unwrap_or_default();
+            lines.push(format!("Party: {}{leader}.", members.join(", ")));
         }
         lines.extend(
             self.journal
@@ -185,6 +240,18 @@ impl Known {
             "haha",
             "thank_you",
             "on_my_way",
+            "too_bad",
+            "ouch",
+            "hang_in",
+            "well_done",
+            "welcome_back",
+            "what_about_you",
+            "not_sure",
+            "cant_now",
+            "right_away",
+            "which_map",
+            "what_mean",
+            "say_again",
         ] {
             out.push(p(id, &[]));
         }
@@ -229,6 +296,14 @@ impl Known {
                         &[name],
                     ));
                     out.push(p("mob_level", &[name, &level.to_string()]));
+                    if !self.in_sight.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+                        out.push(p("no_here", &[name]));
+                    }
+                    if level.abs_diff(self.level) <= SAME_LEVELS {
+                        out.push(p("about_my_level", &[name]));
+                    } else if *level >= self.level + ABOVE_LEVELS {
+                        out.push(p("above_me", &[name]));
+                    }
                     out.push(p("mob_hp", &[name, &hp.to_string()]));
                     if self.killed(name) == 0
                         && !self.in_sight.iter().any(|m| m.eq_ignore_ascii_case(name))
@@ -307,6 +382,54 @@ impl Known {
         }
         if self.kills_total > 0 {
             out.push(p("total_kills", &[&self.kills_total.to_string()]));
+            if self.deaths_total == 0 {
+                out.push(p("no_deaths", &[]));
+            }
+        }
+        if let Some(map) = self.hunt_map.as_ref().filter(|_| self.hunting) {
+            out.push(p("busy_on", &[map]));
+            if let Some(m) = self.in_sight.iter().find(|m| self.killed(m) > 0) {
+                out.push(p("killing_now", &[m]));
+            }
+        }
+        if self.low_potions {
+            out.push(p("low_potions", &[]));
+        }
+        if matches!(self.doing.as_str(), "sell loot" | "buy potions") {
+            out.push(p("going_town", &[]));
+        }
+        if let Some(item) = self.doing.strip_prefix("buy ").filter(|i| *i != "potions") {
+            // "buy 3 Red Potion": the item without the amount
+            let item = item
+                .split_once(' ')
+                .filter(|(n, _)| n.parse::<u32>().is_ok())
+                .map_or(item, |(_, i)| i);
+            out.push(p("going_buy", &[item]));
+        }
+        if self.hp_frac > 0.0 && self.hp_frac < LOW_HP {
+            out.push(p("low_hp", &[]));
+        }
+        if self.weight_frac >= HEAVY {
+            out.push(p("too_heavy", &[]));
+        }
+        out.push(p("my_zeny", &[&self.zeny.to_string()]));
+        if self.skill_points > 0 {
+            out.push(p("skill_points", &[&self.skill_points.to_string()]));
+        }
+        if self.status_points > 0 {
+            out.push(p("stat_points", &[&self.status_points.to_string()]));
+        }
+        if let Some(job) = self
+            .job_target
+            .as_ref()
+            .filter(|j| !j.eq_ignore_ascii_case(&self.job))
+        {
+            out.push(p("next_job", &[job]));
+            // A Novice changes at job level 10, a first job at 40
+            let needed = if self.job == "Novice" { 10 } else { 40 };
+            if self.job_level < needed {
+                out.push(p("need_job_level", &[&needed.to_string(), job]));
+            }
         }
         if self.deaths_total > 0 {
             out.push(p("total_deaths", &[&self.deaths_total.to_string()]));
@@ -314,7 +437,22 @@ impl Known {
         match &self.party {
             Some(members) => {
                 out.extend(members.iter().map(|m| p("party_with", &[m])));
+                if self.hunting {
+                    out.extend(members.iter().map(|m| p("hunting_with", &[m])));
+                }
                 out.push(p("wait_me", &[]));
+                if self.leader.is_some()
+                    && self.leader == self.other
+                    && self.leader.as_deref() != Some(self.me.as_str())
+                {
+                    out.push(p("follow_you", &[]));
+                }
+                if self.doing == "rest" {
+                    out.push(p("wait_resting", &[]));
+                }
+                if self.can_heal {
+                    out.push(p("can_heal", &[]));
+                }
             }
             None => out.push(p("want_party", &[])),
         }
@@ -348,6 +486,10 @@ impl Known {
         });
         out
     }
+}
+
+fn frac(a: u32, b: u32) -> f32 {
+    if b == 0 { 0.0 } else { a as f32 / b as f32 }
 }
 
 /// The other members of the bot's party, `None` out of one.

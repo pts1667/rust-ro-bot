@@ -41,6 +41,39 @@ pub fn job_path(job: &str) -> Option<(Vec<&'static str>, &'static str)> {
     };
     Some((path, build))
 }
+/// The first jobs a Novice can still head for: any while its stats are as created (all the same), else those its
+/// build suits, or any when none does.
+pub fn open_first_jobs(stats: [u32; 6], build: &str) -> Vec<&'static str> {
+    if stats.iter().all(|s| *s == stats[0]) {
+        return FIRST_JOBS.to_vec();
+    }
+    let suited: Vec<&'static str> = FIRST_JOBS
+        .iter()
+        .copied()
+        .filter(|j| job_path(j).is_some_and(|(_, b)| b == build))
+        .collect();
+    if suited.is_empty() {
+        FIRST_JOBS.to_vec()
+    } else {
+        suited
+    }
+}
+
+/// The second jobs a first job leads to: what a character at job level 40 picks among, at random.
+pub fn second_jobs_of(first: &str) -> Vec<&'static str> {
+    JOBS.iter()
+        .copied()
+        .filter(|j| {
+            job_path(j).is_some_and(|(path, _)| path.len() == 2 && same_job(path[0], first))
+        })
+        .collect()
+}
+
+/// Whether `job` is one of the first jobs (the server names them as it does, e.g. Swordsman for Swordman).
+pub fn is_first_job(job: &str) -> bool {
+    FIRST_JOBS.iter().any(|j| same_job(j, job))
+}
+
 /// Every job `job_target` can name: the first jobs, then the second jobs.
 pub const JOBS: [&str; 19] = [
     "Swordman",
@@ -167,6 +200,23 @@ impl StrategicState {
                 OBJECTIVE_LEN,
             );
         }
+    }
+
+    /// Heads for the first job `job`. While the stats are as created (`fresh`), the build follows the job.
+    pub fn head_for(&mut self, job: &str, fresh: bool) {
+        self.job_target = Some(job.to_owned());
+        if fresh
+            && self.pinned_build.is_none()
+            && let Some((_, build)) = job_path(job)
+        {
+            self.stat_build = build.to_owned();
+        }
+        let aim = if is_first_job(job) {
+            format!("Become a {job} at job level 10, then grow strong as one.")
+        } else {
+            format!("Become a {job} through its job quest, then grow strong as one.")
+        };
+        self.objective = truncate(&aim, OBJECTIVE_LEN);
     }
 
     /// Once the character has become its `job_target`, the target and the objective about it are done: clears the
@@ -385,6 +435,39 @@ fn same_job(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_first_job_leads_to_two_second_jobs() {
+        assert_eq!(second_jobs_of("Swordsman"), vec!["Knight", "Crusader"]);
+        assert_eq!(second_jobs_of("Thief"), vec!["Assassin", "Rogue"]);
+        assert!(second_jobs_of("Novice").is_empty());
+        assert!(is_first_job("Swordsman") && !is_first_job("Knight"));
+    }
+
+    #[test]
+    fn a_novice_heads_for_a_job_its_stats_suit() {
+        use super::{FIRST_JOBS, StrategicState, open_first_jobs};
+        assert_eq!(open_first_jobs([1; 6], "melee"), FIRST_JOBS.to_vec());
+        assert_eq!(
+            open_first_jobs([12, 6, 4, 1, 6, 1], "melee"),
+            vec!["Swordman", "Merchant", "Thief"]
+        );
+        assert_eq!(
+            open_first_jobs([1, 1, 3, 9, 5, 1], "caster"),
+            vec!["Mage", "Acolyte"]
+        );
+        let mut s = StrategicState::default();
+        s.head_for("Mage", true);
+        assert_eq!(
+            (s.job_target.as_deref(), s.stat_build.as_str()),
+            (Some("Mage"), "caster")
+        );
+        let mut s = StrategicState::default();
+        s.head_for("Thief", false);
+        assert_eq!(
+            (s.job_target.as_deref(), s.stat_build.as_str()),
+            (Some("Thief"), "melee")
+        );
+    }
     use super::*;
 
     #[test]

@@ -22,12 +22,17 @@ use crate::api::{Action, Observation, Party, PartyMember, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::Goal;
 use crate::goap::state::HP_LOW;
+use crate::knowledge::grounds::{lethal_monster, safe_hops};
 use chat::Said;
 
 /// How far a character sees around itself, in cells.
 pub const SIGHT: u32 = 14;
 /// A follower walks back to the one it follows when further than this.
 const FOLLOW_FAR: u32 = 7;
+/// Most warps a member goes to follow; further, it plays by itself until the one it follows is near again.
+const FOLLOW_HOPS: u32 = 6;
+/// How long the answer to "can I follow to that map" holds.
+const FOLLOW_CHECK_EVERY: Duration = Duration::from_secs(120);
 /// A follower fights monsters this close to the one it follows.
 const ASSIST_RADIUS: u32 = 10;
 /// Basic Skill level that creating a party takes.
@@ -143,6 +148,8 @@ pub struct PartyPlay {
     pub trade_since: Option<Instant>,
     /// Finding a party by itself, see `recruit`.
     pub recruiting: recruit::Recruiting,
+    /// The map last checked for following there, when, and whether the bot can.
+    follow_check: Option<(String, Instant, bool)>,
 }
 
 impl PartyPlay {
@@ -169,6 +176,7 @@ impl PartyPlay {
             buffs: HashMap::new(),
             trade_since: None,
             recruiting: recruit::Recruiting::new(last_seq),
+            follow_check: None,
         }
     }
 
@@ -607,7 +615,44 @@ impl Bot {
         else {
             return Ok(None);
         };
+        if !followed.map.is_empty()
+            && followed.map != obs.map.name
+            && !self.can_follow_to(obs, &followed.map).await?
+        {
+            return Ok(None);
+        }
         self.follow(obs, &followed).await.map(Some)
+    }
+
+    /// Whether the bot can follow to `map`: within `FOLLOW_HOPS` warps, on a way that crosses no map deadly for it,
+    /// to a map that is not deadly itself. Members went 30 warps after their leader, and 15 died on the way.
+    async fn can_follow_to(&mut self, obs: &Observation, map: &str) -> Result<bool> {
+        if let Some((checked, at, ok)) = &self.party.as_ref().expect("party play").follow_check
+            && checked == map
+            && at.elapsed() < FOLLOW_CHECK_EVERY
+        {
+            return Ok(*ok);
+        }
+        let fighter = self.knowledge.fighter(obs).await?;
+        let avoid: std::collections::HashSet<String> = self
+            .memory
+            .strategy
+            .avoid_maps
+            .iter()
+            .cloned()
+            .chain(self.recent_deadly_ways().into_iter().filter(|m| m != map))
+            .collect();
+        let mut lethal = HashMap::new();
+        let (db, graph) = (&self.knowledge.db, &self.knowledge.graph);
+        let hops = safe_hops(db, graph, &fighter, &obs.map.name, map, &avoid, &mut lethal).await?;
+        let deadly_there = lethal_monster(db, map, &fighter).await;
+        let ok = hops.is_some_and(|h| h <= FOLLOW_HOPS) && deadly_there.is_none();
+        if !ok {
+            tracing::info!(to = %map, ?hops, deadly = ?deadly_there, "too far or too dangerous to follow, playing alone meanwhile");
+        }
+        self.party.as_mut().expect("party play").follow_check =
+            Some((map.to_owned(), Instant::now(), ok));
+        Ok(ok)
     }
 
     /// One step at the side of `followed`: to its map, near it, then the fight.

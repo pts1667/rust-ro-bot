@@ -129,10 +129,13 @@ impl WorldGraph {
         for a in &data.arrivals {
             let to = a.from.map.id_str();
             // No guess where the map has a warp there of its own, even one left out as hidden by a bigger warp
+            // Nor where an NPC with a condition is the way there: the Culvert Guardian on prt_fild05 lets in only
+            // those who took up the Culvert quest
             if to.is_empty()
                 || to == map
                 || data.warps.iter().any(|w| w.to.map.id_str() == to)
                 || edges.iter().any(|e| e.to == to)
+                || data.transports.iter().any(|t| t.gates(&to))
             {
                 continue;
             }
@@ -369,6 +372,55 @@ mod tests {
             std::fs::write(dir.join(format!("db_maps_{name}.json")), data.to_string()).unwrap();
         }
         WorldGraph::new(Db::new("http://127.0.0.1:9", Some(dir)).unwrap())
+    }
+
+    #[tokio::test]
+    async fn no_guessed_way_where_an_npc_with_a_condition_leads() {
+        // prt_fild05 and the Culvert: the way out of the sewer lands next to the guardian, who lets in only those
+        // on the quest. The field lists no warp in, so the way back used to be guessed.
+        let g = cache(
+            &[
+                ("field", vec![warp(10, 1, "town", 1)]),
+                ("sewer", vec![warp(20, 1, "field", 1)]),
+                ("cave", vec![warp(30, 1, "field", 1)]),
+                ("town", vec![warp(40, 1, "field", 1)]),
+            ],
+            "gated",
+        );
+        let edges = |g: &WorldGraph| {
+            let g = g.clone();
+            async move {
+                let mut to: Vec<String> = g
+                    .edges("field")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.to.clone())
+                    .collect();
+                to.sort();
+                to
+            }
+        };
+        assert_eq!(edges(&g).await, vec!["cave", "sewer", "town"]);
+        // The guardian, as `/db/maps` lists it
+        let dir = std::env::temp_dir().join(format!("rro-graph-gated2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["field", "sewer", "cave", "town"] {
+            let src = std::env::temp_dir()
+                .join(format!("rro-graph-gated-{}", std::process::id()))
+                .join(format!("db_maps_{name}.json"));
+            let mut data: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(src).unwrap()).unwrap();
+            if name == "field" {
+                data["transports"] = json!([
+                    {"checks": ["variable"], "to": [{"map": {"id": "sewer", "name": "sewer"}, "x": 1, "y": 1}]},
+                    {"checks": [], "to": [{"map": {"id": "cave", "name": "cave"}, "x": 1, "y": 1}]}
+                ]);
+            }
+            std::fs::write(dir.join(format!("db_maps_{name}.json")), data.to_string()).unwrap();
+        }
+        let g = WorldGraph::new(Db::new("http://127.0.0.1:9", Some(dir)).unwrap());
+        assert_eq!(edges(&g).await, vec!["cave", "town"]);
     }
 
     #[tokio::test]

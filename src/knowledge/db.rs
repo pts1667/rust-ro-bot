@@ -56,6 +56,30 @@ pub struct MapData {
     pub connected_maps: Vec<Link>,
     /// Warps of other maps that land here.
     pub arrivals: Vec<Arrival>,
+    /// NPCs that send a character to other maps (guards, sewer entrances, ship captains).
+    pub transports: Vec<Transport>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Transport {
+    /// What the NPC's script checks first (`zeny`, `item`, `quest`, `level`, `job`, `variable`): the way has a
+    /// condition.
+    pub checks: Vec<String>,
+    /// The places it sends to; a warper's is a link to `/db/destinations` instead, so it is read loosely: a map that
+    /// failed to parse dropped out of the graph, and with it every town that has a warper.
+    pub to: serde_json::Value,
+}
+
+impl Transport {
+    /// Whether the NPC leads to `map`, but only under a condition.
+    pub fn gates(&self, map: &str) -> bool {
+        !self.checks.is_empty()
+            && self
+                .to
+                .as_array()
+                .is_some_and(|to| to.iter().any(|t| t["map"]["id"].as_str() == Some(map)))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -425,6 +449,21 @@ fn cache_file_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_map_with_a_warper_parses_and_a_guard_gates() {
+        let map: MapData = serde_json::from_value(serde_json::json!({
+            "name": "prontera",
+            "transports": [
+                {"checks": [], "to": "/db/destinations", "warper": true},
+                {"checks": ["variable"], "to": [{"map": {"id": "prt_sewb1", "name": "prt_sewb1"}, "x": 131, "y": 247}]}
+            ]
+        }))
+        .unwrap();
+        assert!(!map.transports[0].gates("prt_sewb1"));
+        assert!(map.transports[1].gates("prt_sewb1"));
+        assert!(!map.transports[1].gates("prt_fild05"));
+    }
 
     #[test]
     fn heal_amounts_come_from_the_script() {

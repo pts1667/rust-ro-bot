@@ -77,6 +77,12 @@ pub struct Snapshot {
     pub friends: Vec<String>,
     /// The strategist's notes (Σ), as the agent last got them.
     pub notes: Vec<String>,
+    /// The job the strategist aims for (Σ).
+    pub job_target: Option<String>,
+    /// The bot heals its party members (the healer's role, as an Acolyte or Priest).
+    pub can_heal: bool,
+    /// Maps the bot died crossing lately: no hunting ground on a way through them.
+    pub deadly_ways: Vec<String>,
 }
 
 /// Why the strategist should think now. The texts are only read through `Debug`, in the trigger log.
@@ -284,6 +290,34 @@ pub fn apply_lessons(
     }
 }
 
+/// Sets the first job a Novice heads for, which it did not have: one at random among the jobs its stats still suit.
+/// Without it, every bot kept the default build and became a Swordman, and the decision model, asked, picked
+/// Swordman 7 times in 10.
+fn pick_first_job(state: &mut StrategicState, snap: &Snapshot) {
+    let s = &snap.obs.me.stats;
+    let stats = [s.str, s.agi, s.vit, s.int, s.dex, s.luk];
+    let fresh = stats.iter().all(|v| *v == stats[0]);
+    let jobs = skill_state::open_first_jobs(stats, &state.stat_build);
+    let job = jobs[rand::random_range(0..jobs.len())];
+    state.head_for(job, fresh);
+    tracing::info!(target: "strategist", job, ?jobs, fresh, build = %state.stat_build, "first job chosen");
+}
+
+/// The job level from which a first job's character heads for a second job.
+const SECOND_JOB_LEVEL: u32 = 40;
+
+/// Sets the second job a character past job level 40 heads for, when it has none: one at random among the second
+/// jobs of its first job (Swordman: Knight or Crusader). The quests of the other second jobs are left alone then.
+fn pick_second_job(state: &mut StrategicState, snap: &Snapshot) {
+    let jobs = skill_state::second_jobs_of(&snap.obs.me.job);
+    if jobs.is_empty() {
+        return;
+    }
+    let job = jobs[rand::random_range(0..jobs.len())];
+    state.head_for(job, false);
+    tracing::info!(target: "strategist", job, ?jobs, "second job chosen");
+}
+
 /// One decision: the LLM or the decision model when there is one (for its share of the steps), the fallback
 /// otherwise or when the model fails.
 async fn decide(
@@ -296,6 +330,15 @@ async fn decide(
     history: &mut Option<history::History>,
 ) -> Result<(Opt, String, bool)> {
     state.on_job(&snap.obs.me.job);
+    if state.job_target.is_none() && state.pinned_jobs.is_empty() {
+        if snap.obs.me.job.eq_ignore_ascii_case("novice") {
+            pick_first_job(state, snap);
+        } else if skill_state::is_first_job(&snap.obs.me.job)
+            && snap.obs.me.job_level >= SECOND_JOB_LEVEL
+        {
+            pick_second_job(state, snap);
+        }
+    }
     // The decision model looks back at what happened lately, for notes, before it decides
     if let Some(d) = decider {
         match d.learn(state, snap).await {

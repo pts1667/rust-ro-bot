@@ -47,6 +47,10 @@ fn hopeless(reason: &str) -> bool {
         "does not sell",
         "buys none",
         "cannot afford",
+        // Dying on the way says the way is too hard now: the same trip would end the same
+        "died on the way",
+        "too many warps",
+        "other warps",
     ]
     .iter()
     .any(|k| reason.contains(k))
@@ -509,6 +513,9 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
             .map(|p| p.config.friends.clone())
             .unwrap_or_default(),
         notes: bot.memory.strategy.notes.clone(),
+        job_target: bot.memory.strategy.job_target.clone(),
+        can_heal: bot.can_heal(obs),
+        deadly_ways: bot.recent_deadly_ways(),
     };
     handle.snapshots.send_replace(Some(snap));
 }
