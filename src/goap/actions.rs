@@ -8,11 +8,15 @@ pub enum Step {
     /// Talk the Training Grounds receptionist into sending the bot to a town.
     ExitTraining,
     /// Walk the warps to a map.
-    Travel { map: String },
+    Travel {
+        map: String,
+    },
     /// Stand still until HP is back.
     Rest,
     /// Fight one monster on the map, then pick up what it dropped.
-    Hunt { map: String },
+    Hunt {
+        map: String,
+    },
     /// Walk to the shop NPC of the plan.
     WalkToShop,
     SellLoot,
@@ -20,13 +24,25 @@ pub enum Step {
     RaiseStats,
     LearnSkills,
     /// Talk to the Job Master.
-    ChangeJob { job: String },
+    ChangeJob {
+        job: String,
+    },
     /// Buy a piece of equipment at a shop of this map and wear it.
-    BuyGear { item: u32, map: String },
+    BuyGear {
+        item: u32,
+        map: String,
+    },
     /// Buy items at a shop of this map until the bot has `amount`.
-    BuyItem { item: u32, amount: u32, map: String },
+    BuyItem {
+        item: u32,
+        amount: u32,
+        map: String,
+    },
     /// Do the current stage of a quest, on this map.
-    Quest { id: String, map: String },
+    Quest {
+        id: String,
+        map: String,
+    },
 }
 
 /// Where the plan's shop and Job Master are, and how far maps are, as known when planning.
@@ -42,7 +58,11 @@ pub struct PlanContext {
 
 impl PlanContext {
     fn travel_cost(&self, map: &str) -> u32 {
-        self.hops.iter().find(|(m, _)| m == map).map(|(_, h)| 2 + 2 * h).unwrap_or(12)
+        self.hops
+            .iter()
+            .find(|(m, _)| m == map)
+            .map(|(_, h)| 2 + 2 * h)
+            .unwrap_or(12)
     }
 }
 
@@ -69,11 +89,17 @@ impl Step {
             Step::Hunt { map } => &ws.map == map && ws.hp_ok,
             Step::WalkToShop => ctx.shop_map.as_deref() == Some(ws.map.as_str()) && !ws.near_shop,
             Step::SellLoot => ws.near_shop && ws.loot_to_sell,
-            Step::BuyPotions => ws.near_shop && ws.can_afford_potions && (!ws.has_potions || ws.ammo_low),
+            Step::BuyPotions => {
+                ws.near_shop && ws.can_afford_potions && (!ws.has_potions || ws.ammo_low)
+            }
             Step::RaiseStats => ws.status_points,
             Step::LearnSkills => ws.skill_points,
-            Step::ChangeJob { .. } => ctx.job_map.as_deref() == Some(ws.map.as_str()) && ws.job_change_ready,
-            Step::BuyGear { map, .. } | Step::BuyItem { map, .. } | Step::Quest { map, .. } => &ws.map == map,
+            Step::ChangeJob { .. } => {
+                ctx.job_map.as_deref() == Some(ws.map.as_str()) && ws.job_change_ready
+            }
+            Step::BuyGear { map, .. } | Step::BuyItem { map, .. } | Step::Quest { map, .. } => {
+                &ws.map == map
+            }
         }
     }
 

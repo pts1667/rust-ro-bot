@@ -33,7 +33,9 @@ pub(super) fn bring(
         skills: &[],
         stages: vec![
             gather("bring what the teacher asks for", items),
-            talk("learn the skill", map, npc, x, y).menu(menu).done(Check::Skill(skill)),
+            talk("learn the skill", map, npc, x, y)
+                .menu(menu)
+                .done(Check::Skill(skill)),
         ],
     }
 }
@@ -56,10 +58,20 @@ fn first_aid() -> Quest {
         sex: None,
         skills: &[],
         stages: vec![
-            talk("ask Nami to teach First Aid", "prt_in", "Nami", 234, 133).menu(&["Continue conversation"]).said("small preparations"),
-            talk("get bandages from the Nursing Instructor", "prt_castle", "Nursing Instructor", 175, 146),
+            talk("ask Nami to teach First Aid", "prt_in", "Nami", 234, 133)
+                .menu(&["Continue conversation"])
+                .said("small preparations"),
+            talk(
+                "get bandages from the Nursing Instructor",
+                "prt_castle",
+                "Nursing Instructor",
+                175,
+                146,
+            ),
             gather("bring 3 Red Herb and 3 Clover", &[(507, 3), (705, 3)]),
-            talk("show Nami the herbs", "prt_in", "Nami", 234, 133).menu(&["Continue conversation"]).done(Check::Skill("NV_FIRSTAID")),
+            talk("show Nami the herbs", "prt_in", "Nami", 234, 133)
+                .menu(&["Continue conversation"])
+                .done(Check::Skill("NV_FIRSTAID")),
         ],
     }
 }
@@ -77,9 +89,31 @@ fn play_dead() -> Quest {
         sex: None,
         skills: &[("NV_FIRSTAID", 1)],
         stages: vec![
-            talk("ask the Chivalry Member about Play Dead", "prt_in", "Chivalry Member", 73, 87).said("Newbie Tag").done(Check::Item(7039)),
-            talk("get a Newbie Tag from the Nursing Instructor", "prt_castle", "Nursing Instructor", 175, 146).done(Check::Item(7039)),
-            talk("bring the Newbie Tag to the Chivalry Member", "prt_in", "Chivalry Member", 73, 87).done(Check::Skill("NV_TRICKDEAD")),
+            talk(
+                "ask the Chivalry Member about Play Dead",
+                "prt_in",
+                "Chivalry Member",
+                73,
+                87,
+            )
+            .said("Newbie Tag")
+            .done(Check::Item(7039)),
+            talk(
+                "get a Newbie Tag from the Nursing Instructor",
+                "prt_castle",
+                "Nursing Instructor",
+                175,
+                146,
+            )
+            .done(Check::Item(7039)),
+            talk(
+                "bring the Newbie Tag to the Chivalry Member",
+                "prt_in",
+                "Chivalry Member",
+                73,
+                87,
+            )
+            .done(Check::Skill("NV_TRICKDEAD")),
         ],
     }
 }
@@ -94,7 +128,15 @@ const THIEF: &[&str] = &["Thief", "Assassin", "Rogue"];
 fn first_jobs() -> Vec<Quest> {
     // A second job of the line may take the quest at any job level; only the first job needs the level.
     vec![
-        bring("SM_MOVINGRECOVERY", "Moving HP Recovery quest", SWORDMAN, 35, &[(713, 200), (1058, 1)], ("izlude_in", "Knight De Thomas", 175, 130), &["Yes."]),
+        bring(
+            "SM_MOVINGRECOVERY",
+            "Moving HP Recovery quest",
+            SWORDMAN,
+            35,
+            &[(713, 200), (1058, 1)],
+            ("izlude_in", "Knight De Thomas", 175, 130),
+            &["Yes."],
+        ),
         bring(
             "SM_FATALBLOW",
             "Fatal Blow quest",
@@ -140,8 +182,24 @@ fn first_jobs() -> Vec<Quest> {
             ("payon", "Jason", 103, 63),
             &["Teach me"],
         ),
-        bring("AL_HOLYLIGHT", "Holy Light quest", ACOLYTE, 30, &[(727, 1), (991, 1), (2608, 1)], ("prt_church", "Cleric", 173, 23), &["Holy light"]),
-        bring("MC_LOUD", "Crazy Uproar quest", MERCHANT, 15, &[(722, 7), (532, 1), (921, 50)], ("alberta", "Necko", 83, 96), &["Yes!!!!"]),
+        bring(
+            "AL_HOLYLIGHT",
+            "Holy Light quest",
+            ACOLYTE,
+            30,
+            &[(727, 1), (991, 1), (2608, 1)],
+            ("prt_church", "Cleric", 173, 23),
+            &["Holy light"],
+        ),
+        bring(
+            "MC_LOUD",
+            "Crazy Uproar quest",
+            MERCHANT,
+            15,
+            &[(722, 7), (532, 1), (921, 50)],
+            ("alberta", "Necko", 83, 96),
+            &["Yes!!!!"],
+        ),
         bring(
             "MC_CHANGECART",
             "Change Cart quest",
@@ -161,9 +219,33 @@ fn first_jobs() -> Vec<Quest> {
             ("alberta", "Gershaun", 232, 106),
             &["that's why I came"],
         ),
-        bring("TF_BACKSLIDING", "Back Slide quest", THIEF, 35, &[(940, 20)], ("moc_prydb1", "Alcouskou", 154, 128), &["Back Slide"]),
-        bring("TF_PICKSTONE", "Find Stone quest", THIEF, 20, &[(912, 1), (948, 1), (908, 5)], ("moc_prydb1", "Alcouskou", 154, 128), &["Find Stone"]),
-        bring("TF_THROWSTONE", "Stone Fling quest", THIEF, 15, &[(910, 2), (911, 2)], ("moc_prydb1", "Alcouskou", 154, 128), &["Stone Fling"]),
+        bring(
+            "TF_BACKSLIDING",
+            "Back Slide quest",
+            THIEF,
+            35,
+            &[(940, 20)],
+            ("moc_prydb1", "Alcouskou", 154, 128),
+            &["Back Slide"],
+        ),
+        bring(
+            "TF_PICKSTONE",
+            "Find Stone quest",
+            THIEF,
+            20,
+            &[(912, 1), (948, 1), (908, 5)],
+            ("moc_prydb1", "Alcouskou", 154, 128),
+            &["Find Stone"],
+        ),
+        bring(
+            "TF_THROWSTONE",
+            "Stone Fling quest",
+            THIEF,
+            15,
+            &[(910, 2), (911, 2)],
+            ("moc_prydb1", "Alcouskou", 154, 128),
+            &["Stone Fling"],
+        ),
         sand_attack(),
     ]
 }
@@ -182,12 +264,36 @@ fn sand_attack() -> Quest {
         skills: &[],
         stages: vec![
             gather("bring 5 Fine Grit", &[(7041, 5)]),
-            talk("give Alcouskou the Fine Grit", ALCOUSKOU.0, ALCOUSKOU.1, ALCOUSKOU.2, ALCOUSKOU.3).menu(&["Sand Attack"]).done(Check::NoItem(7041)),
-            gather("bring a Cactus Needle, an Earthworm Peeling and a Cobweb", &[(952, 1), (1055, 1), (1025, 1)]),
-            talk("get a Leather Bag of Infinity from the Bag Seller", "payon", "Bag Seller", 91, 77).done(Check::Item(7042)),
-            talk("bring the bag to Alcouskou", ALCOUSKOU.0, ALCOUSKOU.1, ALCOUSKOU.2, ALCOUSKOU.3)
-                .menu(&["Sand Attack"])
-                .done(Check::Skill("TF_SPRINKLESAND")),
+            talk(
+                "give Alcouskou the Fine Grit",
+                ALCOUSKOU.0,
+                ALCOUSKOU.1,
+                ALCOUSKOU.2,
+                ALCOUSKOU.3,
+            )
+            .menu(&["Sand Attack"])
+            .done(Check::NoItem(7041)),
+            gather(
+                "bring a Cactus Needle, an Earthworm Peeling and a Cobweb",
+                &[(952, 1), (1055, 1), (1025, 1)],
+            ),
+            talk(
+                "get a Leather Bag of Infinity from the Bag Seller",
+                "payon",
+                "Bag Seller",
+                91,
+                77,
+            )
+            .done(Check::Item(7042)),
+            talk(
+                "bring the bag to Alcouskou",
+                ALCOUSKOU.0,
+                ALCOUSKOU.1,
+                ALCOUSKOU.2,
+                ALCOUSKOU.3,
+            )
+            .menu(&["Sand Attack"])
+            .done(Check::Skill("TF_SPRINKLESAND")),
         ],
     }
 }

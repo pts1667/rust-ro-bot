@@ -103,7 +103,11 @@ pub struct Me {
 
 impl Me {
     pub fn hp_frac(&self) -> f32 {
-        if self.max_hp == 0 { 1.0 } else { self.hp as f32 / self.max_hp as f32 }
+        if self.max_hp == 0 {
+            1.0
+        } else {
+            self.hp as f32 / self.max_hp as f32
+        }
     }
 
     pub fn pos(&self) -> (u16, u16) {
@@ -438,11 +442,19 @@ impl Observation {
     }
 
     pub fn item_count(&self, item_id: u32) -> u32 {
-        self.inventory.iter().filter(|i| i.item_id == item_id).map(|i| i.amount).sum()
+        self.inventory
+            .iter()
+            .filter(|i| i.item_id == item_id)
+            .map(|i| i.amount)
+            .sum()
     }
 
     pub fn skill_level(&self, name: &str) -> u32 {
-        self.skills.iter().find(|s| s.name == name).map(|s| s.level).unwrap_or(0)
+        self.skills
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.level)
+            .unwrap_or(0)
     }
 
     pub fn last_message_seq(&self) -> u64 {
@@ -451,14 +463,17 @@ impl Observation {
 
     /// A player standing within `radius` cells, by name.
     pub fn player_near(&self, name: &str, radius: u32) -> Option<&Player> {
-        self.players.iter().find(|p| p.name.eq_ignore_ascii_case(name) && dist((p.x, p.y), self.pos()) <= radius)
+        self.players
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name) && dist((p.x, p.y), self.pos()) <= radius)
     }
 
     /// Whether `cell` is on a warp of this map or within `margin` cells of one. Walking there, or through there,
     /// takes the bot to another map.
     pub fn near_warp(&self, cell: (u16, u16), margin: u16) -> bool {
         self.warps.iter().any(|w| {
-            cell.0.abs_diff(w.x) <= w.half_width + margin && cell.1.abs_diff(w.y) <= w.half_height + margin
+            cell.0.abs_diff(w.x) <= w.half_width + margin
+                && cell.1.abs_diff(w.y) <= w.half_height + margin
         })
     }
 }
@@ -501,7 +516,11 @@ mod tests {
         assert_eq!(obs.me.status_points, 48);
         assert_eq!(obs.mobs[0].name, "Poring");
         assert_eq!(obs.warps[0].to_map, "prt_fild08");
-        assert!(obs.near_warp((158, 21), 0) && obs.near_warp((160, 23), 2) && !obs.near_warp((160, 23), 1));
+        assert!(
+            obs.near_warp((158, 21), 0)
+                && obs.near_warp((160, 23), 2)
+                && !obs.near_warp((160, 23), 1)
+        );
         assert_eq!(obs.skills[0].range, Some(9));
         let party = obs.party.as_ref().unwrap();
         assert_eq!(party.leader.as_deref(), Some("Scout"));

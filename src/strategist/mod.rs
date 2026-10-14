@@ -5,6 +5,7 @@
 //! and a patch ΔΣ. The session (lookups and any reasoning) is then dropped; only the validated Σ survives.
 //! Without the LLM, or when it fails, a deterministic fallback picks from the same options.
 
+pub mod decided;
 pub mod eval;
 mod examples;
 pub mod helper;
@@ -74,6 +75,8 @@ pub struct Snapshot {
     pub party_play: bool,
     /// The characters the bot was told it plays with.
     pub friends: Vec<String>,
+    /// The strategist's notes (Σ), as the agent last got them.
+    pub notes: Vec<String>,
 }
 
 /// Why the strategist should think now. The texts are only read through `Debug`, in the trigger log.
@@ -88,6 +91,10 @@ pub enum Event {
     GoalFailed(String),
     /// Someone asked the bot for something in chat.
     Asked,
+    /// Notes the bot took on the players' forum, for Σ.
+    ForumNotes(Vec<String>),
+    /// Lessons the decision model kept from the forum: a note each, and what it changes in Σ.
+    ForumLessons(Vec<crate::voice::known::Lesson>),
 }
 
 #[derive(Debug, Clone)]
@@ -125,18 +132,42 @@ pub struct LlmDecision {
 
 /// `goal_changes` gets the sequence number of every directive whose goal differs from the previous one, so
 /// long behaviours can stop early.
-pub fn spawn(knowledge: Knowledge, llm: Option<Llm>, mut state: StrategicState, period: Duration, goal_changes: Arc<AtomicU64>) -> Handle {
+/// `decider`: the decision model, which takes its share of the steps when there is no LLM.
+pub fn spawn(
+    knowledge: Knowledge,
+    llm: Option<Llm>,
+    decider: Option<decided::Decider>,
+    mut state: StrategicState,
+    period: Duration,
+    goal_changes: Arc<AtomicU64>,
+) -> Handle {
     examples::scrub_state(&mut state);
     let (dir_tx, dir_rx) = watch::channel(None);
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
     let (snap_tx, snap_rx) = watch::channel(None);
-    tokio::spawn(run(knowledge, llm, state, period, dir_tx, ev_rx, snap_rx, goal_changes));
-    Handle { directives: dir_rx, events: ev_tx, snapshots: snap_tx }
+    tokio::spawn(run(
+        knowledge,
+        llm,
+        decider,
+        state,
+        period,
+        dir_tx,
+        ev_rx,
+        snap_rx,
+        goal_changes,
+    ));
+    Handle {
+        directives: dir_rx,
+        events: ev_tx,
+        snapshots: snap_tx,
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     knowledge: Knowledge,
     llm: Option<Llm>,
+    decider: Option<decided::Decider>,
     mut state: StrategicState,
     period: Duration,
     directives: watch::Sender<Option<Directive>>,
@@ -159,7 +190,17 @@ async fn run(
     loop {
         let snap = snapshots.borrow().clone();
         let Some(snap) = snap else { return };
-        match decide(&knowledge, llm.as_ref(), &mut state, &snap, &mut counters, &mut history).await {
+        match decide(
+            &knowledge,
+            llm.as_ref(),
+            decider.as_ref(),
+            &mut state,
+            &snap,
+            &mut counters,
+            &mut history,
+        )
+        .await
+        {
             Ok((chosen, reason, by_llm)) => {
                 let goal = chosen.goal;
                 seq += 1;
@@ -171,7 +212,17 @@ async fn run(
                     last_goal = Some(goal.clone());
                 }
                 let refusals = options::request_refusals(&snap);
-                let d = Directive { seq, goal, option: chosen.id, asked, refusals, reason, state: state.clone(), by_llm, counters: counters.clone() };
+                let d = Directive {
+                    seq,
+                    goal,
+                    option: chosen.id,
+                    asked,
+                    refusals,
+                    reason,
+                    state: state.clone(),
+                    by_llm,
+                    counters: counters.clone(),
+                };
                 if directives.send(Some(d)).is_err() {
                     return;
                 }
@@ -181,7 +232,10 @@ async fn run(
         // Next trigger: an event, or the period.
         tokio::select! {
             ev = events.recv() => match ev {
-                Some(ev) => why = format!("{ev:?}"),
+                Some(ev) => {
+                    why = format!("{ev:?}");
+                    take_notes(&mut state, &ev);
+                }
                 None => return,
             },
             _ = tokio::time::sleep(period) => why = "periodic".into(),
@@ -190,27 +244,81 @@ async fn run(
         tokio::time::sleep(Duration::from_millis(400)).await;
         while let Ok(ev) = events.try_recv() {
             why = format!("{why}+{ev:?}");
+            take_notes(&mut state, &ev);
         }
     }
 }
 
-/// One decision: the LLM when there is one, the fallback otherwise or when the LLM fails.
+/// Adds the notes of a `ForumNotes` or `ForumLessons` event to Σ, through the same checks as the model's own patches.
+/// A lesson may also leave a monster alone for a few levels, or set the job to head for when none is set.
+fn take_notes(state: &mut StrategicState, ev: &Event) {
+    match ev {
+        Event::ForumNotes(notes) => {
+            let report = state.apply_patch(&json!({ "notes": notes }));
+            tracing::info!(target: "strategist", ?notes, applied = !report.applied.is_empty(), "notes from the forum");
+        }
+        Event::ForumLessons(lessons) => apply_lessons(state, lessons, "forum: "),
+        _ => {}
+    }
+}
+
+/// Adds lessons to Σ: a note each (`prefix` says where it comes from), and what the lesson changes: a monster left
+/// alone for a few levels, or the job to head for when none is set.
+pub fn apply_lessons(
+    state: &mut StrategicState,
+    lessons: &[crate::voice::known::Lesson],
+    prefix: &str,
+) {
+    use crate::voice::known::Effect;
+    for lesson in lessons {
+        let note = format!("{prefix}{}", lesson.note.render());
+        let report = state.apply_patch(&json!({ "notes": [note] }));
+        match &lesson.effect {
+            Effect::Avoid { monster, until } => state.caution(monster, *until),
+            Effect::Job(job) if state.job_target.is_none() => {
+                state.apply_patch(&json!({ "job_target": job }));
+            }
+            _ => {}
+        }
+        tracing::info!(target: "strategist", %note, effect = ?lesson.effect, applied = !report.applied.is_empty(), "lesson");
+    }
+}
+
+/// One decision: the LLM or the decision model when there is one (for its share of the steps), the fallback
+/// otherwise or when the model fails.
 async fn decide(
     knowledge: &Knowledge,
     llm: Option<&Llm>,
+    decider: Option<&decided::Decider>,
     state: &mut StrategicState,
     snap: &Snapshot,
     counters: &mut Counters,
     history: &mut Option<history::History>,
 ) -> Result<(Opt, String, bool)> {
     state.on_job(&snap.obs.me.job);
+    // The decision model looks back at what happened lately, for notes, before it decides
+    if let Some(d) = decider {
+        match d.learn(state, snap).await {
+            Ok(lessons) => apply_lessons(state, &lessons, ""),
+            Err(error) => tracing::warn!(target: "strategist", %error, "no lessons"),
+        }
+    }
     let options = build_options(snap, knowledge, state).await?;
     tracing::debug!(target: "strategist", options = ?options.iter().map(|o| (&o.id, o.score)).collect::<Vec<_>>(), "options");
     if options.len() == 1 {
         return Ok((options[0].clone(), "only option".into(), false));
     }
-    // A share of the steps goes to the fallback, to compare the two and to save LLM time.
-    if let Some(llm) = llm.filter(|l| rand::random::<f32>() < l.share) {
+    // A share of the steps goes to the fallback, to compare the two and to save LLM time. A step never waits in the
+    // LLM server's queue: with every slot busy (other bots, the forum) the fallback decides.
+    let llm = llm.filter(|l| rand::random::<f32>() < l.share);
+    let llm = match llm {
+        Some(l) if !l.slot_free().await => {
+            tracing::info!(target: "strategist", "every LLM slot is busy, the fallback decides");
+            None
+        }
+        other => other,
+    };
+    if let Some(llm) = llm {
         counters.llm_calls += 1;
         let step = match llm.context {
             llm::ContextMode::SkillState => llm_step(llm, knowledge, state, snap, &options).await,
@@ -250,6 +358,20 @@ async fn decide(
             }
         }
     }
+    if let Some(d) = decider.filter(|d| rand::random::<f32>() < d.share) {
+        counters.llm_calls += 1;
+        let start = Instant::now();
+        match decided::decision_step(&d.s1, state, snap, &options).await {
+            Ok((option, reason)) => {
+                tracing::info!(target: "strategist", option = %option.id, ms = start.elapsed().as_millis() as u64, "decision step");
+                return Ok((option, reason, true));
+            }
+            Err(error) => {
+                counters.llm_invalid += 1;
+                tracing::warn!(target: "strategist", %error, "decision step failed, using the fallback");
+            }
+        }
+    }
     let o = fallback(snap, &options, state).ok_or_else(|| anyhow!("no option"))?;
     let reason = format!("fallback: {}", o.line);
     Ok((o, reason, false))
@@ -264,7 +386,9 @@ fn commit_definition(options: &[Opt]) -> ToolDefinition {
 /// llama.cpp read the whole conversation again (2 s a turn at 3k tokens, 12 s at 57k).
 fn commit_tool(options: Option<&[Opt]>) -> ToolDefinition {
     let option = match options {
-        Some(options) => json!({"type": "string", "enum": options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>()}),
+        Some(options) => {
+            json!({"type": "string", "enum": options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>()})
+        }
         None => json!({"type": "string", "description": "One option id from OPTIONS"}),
     };
     ToolDefinition::new(
@@ -299,7 +423,9 @@ fn lookup_tools(knowledge: &Knowledge, snap: &Snapshot) -> ToolRegistry {
             let obs = obs.clone();
             Box::pin(async move {
                 let name = args["name"].as_str().unwrap_or_default().to_owned();
-                let text = monster_info(&k, &obs, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                let text = monster_info(&k, &obs, &name)
+                    .await
+                    .unwrap_or_else(|e| format!("no data: {e}"));
                 Ok(Value::String(text))
             })
         },
@@ -315,7 +441,9 @@ fn lookup_tools(knowledge: &Knowledge, snap: &Snapshot) -> ToolRegistry {
             let k = k.clone();
             Box::pin(async move {
                 let name = args["map"].as_str().unwrap_or_default().to_owned();
-                let text = map_info(&k, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                let text = map_info(&k, &name)
+                    .await
+                    .unwrap_or_else(|e| format!("no data: {e}"));
                 Ok(Value::String(text))
             })
         },
@@ -330,7 +458,11 @@ fn lookup_tools(knowledge: &Knowledge, snap: &Snapshot) -> ToolRegistry {
         move |args: Value| {
             let k = k.clone();
             Box::pin(async move {
-                let title = args["title"].as_str().unwrap_or_default().trim().replace(' ', "_");
+                let title = args["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .replace(' ', "_");
                 let text = match k.db.wiki(&format!("{title}.md")).await {
                     Ok(page) => wiki_digest(&page),
                     Err(e) => format!("no page: {e}"),
@@ -350,19 +482,29 @@ fn lookup_tools(knowledge: &Knowledge, snap: &Snapshot) -> ToolRegistry {
             let k = k.clone();
             Box::pin(async move {
                 let name = args["name"].as_str().unwrap_or_default().to_owned();
-                let text = quest_info(&k, &name).await.unwrap_or_else(|e| format!("no data: {e}"));
+                let text = quest_info(&k, &name)
+                    .await
+                    .unwrap_or_else(|e| format!("no data: {e}"));
                 Ok(Value::String(text))
             })
         },
     );
-    ToolRegistry::new().with_tool(monster).with_tool(map).with_tool(wiki).with_tool(quest)
+    ToolRegistry::new()
+        .with_tool(monster)
+        .with_tool(map)
+        .with_tool(wiki)
+        .with_tool(quest)
 }
 
 /// The prose of a wiki page without links, images and tables, for a small context.
 fn wiki_digest(page: &str) -> String {
     let mut out = String::new();
     for line in page.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('|') || line.starts_with("![") || line.starts_with("---") {
+        if line.is_empty()
+            || line.starts_with('|')
+            || line.starts_with("![")
+            || line.starts_with("---")
+        {
             continue;
         }
         let mut text = String::new();
@@ -398,9 +540,23 @@ async fn quest_info(k: &Knowledge, name: &str) -> Result<String> {
         let Some(id) = hit.id_u32() else { continue };
         let q = k.db.get(&format!("/db/quests/{id}")).await?;
         // `notes` is the same explanation of the data on every quest.
-        let keep = ["title", "description", "guide", "prerequisites", "recommended_level", "sources", "objectives"];
-        let fields: serde_json::Map<String, Value> =
-            keep.iter().filter_map(|key| q.get(*key).filter(|v| !v.is_null()).map(|v| ((*key).to_owned(), v.clone()))).collect();
+        let keep = [
+            "title",
+            "description",
+            "guide",
+            "prerequisites",
+            "recommended_level",
+            "sources",
+            "objectives",
+        ];
+        let fields: serde_json::Map<String, Value> = keep
+            .iter()
+            .filter_map(|key| {
+                q.get(*key)
+                    .filter(|v| !v.is_null())
+                    .map(|v| ((*key).to_owned(), v.clone()))
+            })
+            .collect();
         out.push(Value::Object(fields));
     }
     Ok(serde_json::to_string(&out)?)
@@ -408,10 +564,19 @@ async fn quest_info(k: &Knowledge, name: &str) -> Result<String> {
 
 async fn monster_info(k: &Knowledge, obs: &Observation, name: &str) -> Result<String> {
     let hits = k.db.search("mobs", name, 1).await?;
-    let id = hits.first().and_then(|l| l.id_u32()).ok_or_else(|| anyhow!("unknown monster {name}"))?;
+    let id = hits
+        .first()
+        .and_then(|l| l.id_u32())
+        .ok_or_else(|| anyhow!("unknown monster {name}"))?;
     let m = k.db.mob(id).await?;
     let a = k.fighter(obs).await?.assess(&m);
-    let drops: Vec<String> = m.drops.iter().filter(|d| !d.item.name.is_empty()).take(4).map(|d| d.item.name.clone()).collect();
+    let drops: Vec<String> = m
+        .drops
+        .iter()
+        .filter(|d| !d.item.name.is_empty())
+        .take(4)
+        .map(|d| d.item.name.clone())
+        .collect();
     Ok(format!(
         "{}: level {}, HP {}, base exp {}, job exp {}, {}{}. A fight would take about {:.0} s and cost about {:.0}% of your HP. Drops: {}.",
         m.name_english,
@@ -419,7 +584,11 @@ async fn monster_info(k: &Knowledge, obs: &Observation, name: &str) -> Result<St
         m.hp,
         m.exp,
         m.job_exp,
-        if m.aggressive() { "attacks on sight" } else { "passive" },
+        if m.aggressive() {
+            "attacks on sight"
+        } else {
+            "passive"
+        },
         if m.boss() { ", BOSS" } else { "" },
         a.kill_secs,
         a.danger * 100.0,
@@ -433,18 +602,33 @@ async fn map_info(k: &Knowledge, name: &str) -> Result<String> {
     for s in m.mob_spawns.iter().take(8) {
         mobs.push(format!("{} x{}", s.mob.name, s.amount));
     }
-    let links: Vec<String> = m.connected_maps.iter().take(8).map(|l| l.id_str()).collect();
+    let links: Vec<String> = m
+        .connected_maps
+        .iter()
+        .take(8)
+        .map(|l| l.id_str())
+        .collect();
     Ok(format!(
         "{}: {}. Monsters: {}. Warps to: {}.",
         m.name,
         if m.is_town() { "town" } else { "not a town" },
-        if mobs.is_empty() { "none".into() } else { mobs.join(", ") },
+        if mobs.is_empty() {
+            "none".into()
+        } else {
+            mobs.join(", ")
+        },
         links.join(", ")
     ))
 }
 
 /// One SKILL.state step with the LLM.
-pub async fn llm_step(llm: &Llm, knowledge: &Knowledge, state: &StrategicState, snap: &Snapshot, options: &[Opt]) -> Result<LlmDecision> {
+pub async fn llm_step(
+    llm: &Llm,
+    knowledge: &Knowledge,
+    state: &StrategicState,
+    snap: &Snapshot,
+    options: &[Opt],
+) -> Result<LlmDecision> {
     let options = shuffled(llm, options);
     let user = prompt::user_message(llm.order, state, snap, &options);
     llm_turn(llm, knowledge, snap, &options, user).await
@@ -461,33 +645,56 @@ pub fn shuffled(llm: &Llm, options: &[Opt]) -> Vec<Opt> {
 }
 
 /// One step on a ready user message. `snap` only serves the lookups (the fight estimates of `monster_info`).
-pub async fn llm_turn(llm: &Llm, knowledge: &Knowledge, snap: &Snapshot, options: &[Opt], user: String) -> Result<LlmDecision> {
+pub async fn llm_turn(
+    llm: &Llm,
+    knowledge: &Knowledge,
+    snap: &Snapshot,
+    options: &[Opt],
+    user: String,
+) -> Result<LlmDecision> {
     let start = Instant::now();
-    let system = if llm.examples { format!("{}{}", prompt::SYSTEM, examples::text()) } else { prompt::SYSTEM.to_owned() };
+    let system = if llm.examples {
+        format!("{}{}", prompt::SYSTEM, examples::text())
+    } else {
+        prompt::SYSTEM.to_owned()
+    };
     let prompt_chars = system.len() + user.len();
     let lookups = lookup_tools(knowledge, snap);
-    let commit_only = ToolRegistry::new().with_tool(Tool::new(commit_definition(options), |_| Box::pin(async { Ok(Value::Null) })));
+    let commit_only = ToolRegistry::new().with_tool(Tool::new(commit_definition(options), |_| {
+        Box::pin(async { Ok(Value::Null) })
+    }));
     let mut all = lookup_tools(knowledge, snap);
-    all.insert(Tool::new(commit_definition(options), |_| Box::pin(async { Ok(Value::Null) })));
+    all.insert(Tool::new(commit_definition(options), |_| {
+        Box::pin(async { Ok(Value::Null) })
+    }));
 
     let mut session = ChatSession::with_system_prompt(system);
     session.push_user(user);
     let mut done_lookups = Vec::new();
     for round in 0..=LOOKUP_ROUNDS {
         let last = round == LOOKUP_ROUNDS;
-        let (provider, registry) = if last { (&llm.forced, &commit_only) } else { (&llm.free, &all) };
-        let response = tokio::time::timeout(LLM_TIMEOUT, session.complete_with_tools(provider, registry))
-            .await
-            .map_err(|_| anyhow!("LLM timed out"))?
-            .map_err(|e| anyhow!("LLM request failed: {e}"))?;
+        let (provider, registry) = if last {
+            (&llm.forced, &commit_only)
+        } else {
+            (&llm.free, &all)
+        };
+        let response =
+            tokio::time::timeout(LLM_TIMEOUT, session.complete_with_tools(provider, registry))
+                .await
+                .map_err(|_| anyhow!("LLM timed out"))?
+                .map_err(|e| anyhow!("LLM request failed: {e}"))?;
         let calls = &response.message.tool_calls;
         if let Some(commit) = calls.iter().find(|c| c.function.name == "commit") {
-            let args: Value = llm::parse_json_loose(&commit.function.arguments).ok_or_else(|| anyhow!("commit arguments are not JSON"))?;
+            let args: Value = llm::parse_json_loose(&commit.function.arguments)
+                .ok_or_else(|| anyhow!("commit arguments are not JSON"))?;
             let id = args["option"].as_str().unwrap_or_default();
             // Without grammar the model sometimes names an option that is not offered: say so and let it retry.
             if !last && !options.iter().any(|o| o.id == id) {
                 let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
-                let error = format!("error: {id:?} is not an option; choose one of {}", ids.join(", "));
+                let error = format!(
+                    "error: {id:?} is not an option; choose one of {}",
+                    ids.join(", ")
+                );
                 session.push(ChatMessage::tool_result(&commit.id, "commit", error));
                 continue;
             }
@@ -510,19 +717,39 @@ pub async fn llm_turn(llm: &Llm, knowledge: &Knowledge, snap: &Snapshot, options
                 let result = lookups.execute_call_reporting_errors(c).await;
                 session.push(result.into_message());
             } else {
-                session.push(ChatMessage::tool_result(&c.id, &c.function.name, &format!("skipped: at most {LOOKUPS_PER_ROUND} lookups per turn")));
+                session.push(ChatMessage::tool_result(
+                    &c.id,
+                    &c.function.name,
+                    &format!("skipped: at most {LOOKUPS_PER_ROUND} lookups per turn"),
+                ));
             }
         }
     }
     bail!("the model did not commit")
 }
 
-fn finish(args: Value, options: &[Opt], lookups: Vec<String>, prompt_chars: usize, start: Instant) -> Result<LlmDecision> {
+fn finish(
+    args: Value,
+    options: &[Opt],
+    lookups: Vec<String>,
+    prompt_chars: usize,
+    start: Instant,
+) -> Result<LlmDecision> {
     let id = args["option"].as_str().unwrap_or_default();
-    let option = options.iter().find(|o| o.id == id).cloned().ok_or_else(|| anyhow!("unknown option {id:?}"))?;
+    let option = options
+        .iter()
+        .find(|o| o.id == id)
+        .cloned()
+        .ok_or_else(|| anyhow!("unknown option {id:?}"))?;
     Ok(LlmDecision {
         option,
-        reason: args["analysis"].as_str().or(args["reason"].as_str()).unwrap_or_default().chars().take(300).collect(),
+        reason: args["analysis"]
+            .as_str()
+            .or(args["reason"].as_str())
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect(),
         patch: args.get("state_patch").cloned().unwrap_or(Value::Null),
         lookups,
         prompt_chars,
@@ -537,13 +764,24 @@ mod tests {
     #[test]
     fn wiki_digest_keeps_prose_only() {
         let page = "# Swordman\n\n![img](a.png)\n| a | b |\nThe [Swordman](Swordman.md) is a melee class.\n";
-        assert_eq!(wiki_digest(page).trim(), "Swordman The Swordman is a melee class.");
+        assert_eq!(
+            wiki_digest(page).trim(),
+            "Swordman The Swordman is a melee class."
+        );
     }
 
     #[test]
     fn commit_schema_enumerates_options() {
-        let options = vec![options::Opt { id: "rest".into(), goal: Goal::Rest, line: String::new(), score: 0.0 }];
+        let options = vec![options::Opt {
+            id: "rest".into(),
+            goal: Goal::Rest,
+            line: String::new(),
+            score: 0.0,
+        }];
         let def = commit_definition(&options);
-        assert_eq!(def.function.parameters["properties"]["option"]["enum"], json!(["rest"]));
+        assert_eq!(
+            def.function.parameters["properties"]["option"]["enum"],
+            json!(["rest"])
+        );
     }
 }

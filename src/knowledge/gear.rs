@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 
 use super::db::{Db, ItemData, ShopPlace};
-use crate::api::observation::{Equip, InventoryItem};
 use crate::api::Observation;
+use crate::api::observation::{Equip, InventoryItem};
 
 /// Location bits of the item database.
 pub const LOC_HEAD_LOW: u32 = 1;
@@ -92,11 +92,39 @@ impl Slot {
 /// The bits of `job_flags` a job wears (rust-ro's `EquipClassFlag`): a second job also wears its first job's things.
 pub fn job_flags(job: &str) -> u64 {
     const ORDER: [&str; 26] = [
-        "novice", "acolyte", "priest", "monk", "mage", "wizard", "sage", "thief", "assassin", "rogue", "archer", "hunter", "bard",
-        "dancer", "swordman", "crusader", "knight", "merchant", "alchemist", "blacksmith", "gunslinger", "ninja", "soul linker",
-        "star gladiator", "super novice", "taekwon",
+        "novice",
+        "acolyte",
+        "priest",
+        "monk",
+        "mage",
+        "wizard",
+        "sage",
+        "thief",
+        "assassin",
+        "rogue",
+        "archer",
+        "hunter",
+        "bard",
+        "dancer",
+        "swordman",
+        "crusader",
+        "knight",
+        "merchant",
+        "alchemist",
+        "blacksmith",
+        "gunslinger",
+        "ninja",
+        "soul linker",
+        "star gladiator",
+        "super novice",
+        "taekwon",
     ];
-    let bit = |name: &str| ORDER.iter().position(|j| *j == name).map_or(0, |i| 1u64 << i);
+    let bit = |name: &str| {
+        ORDER
+            .iter()
+            .position(|j| *j == name)
+            .map_or(0, |i| 1u64 << i)
+    };
     let job = normal_job(job);
     let first = match job.as_str() {
         "priest" | "monk" => "acolyte",
@@ -124,7 +152,10 @@ pub fn normal_job(job: &str) -> String {
 
 /// Whether the job fights with a bow, and so needs arrows.
 pub fn uses_bow(job: &str) -> bool {
-    matches!(normal_job(job).as_str(), "archer" | "hunter" | "bard" | "dancer")
+    matches!(
+        normal_job(job).as_str(),
+        "archer" | "hunter" | "bard" | "dancer"
+    )
 }
 
 /// Whether ATK is what the job's weapon is for. Casters keep the staff they have: their spells go by INT.
@@ -147,7 +178,11 @@ pub fn wearable(item: &ItemData, obs: &Observation) -> bool {
     if item.job_flags & job_flags(job) == 0 || item.equip_level_min > obs.me.base_level {
         return false;
     }
-    if let Some(gender) = item.gender.as_deref().filter(|g| !g.eq_ignore_ascii_case("both")) {
+    if let Some(gender) = item
+        .gender
+        .as_deref()
+        .filter(|g| !g.eq_ignore_ascii_case("both"))
+    {
         if !obs.me.sex.is_empty() && !gender.eq_ignore_ascii_case(&obs.me.sex) {
             return false;
         }
@@ -157,7 +192,8 @@ pub fn wearable(item: &ItemData, obs: &Observation) -> bool {
 
 /// Whether `job` can wear an item too: a Novice buys nothing its next job takes off again.
 fn wearable_by(item: &ItemData, job: &str) -> bool {
-    item.job_flags & job_flags(job) != 0 && (item.item_type != "Weapon" || weapon_type_ok(job, &item.weapon_type))
+    item.job_flags & job_flags(job) != 0
+        && (item.item_type != "Weapon" || weapon_type_ok(job, &item.weapon_type))
 }
 
 /// What a piece is worth to the job in its slot.
@@ -181,8 +217,15 @@ impl Worn {
         let mut worn = Worn::default();
         for item in obs.inventory.iter().filter(|i| i.worn_and_usable()) {
             let Some(equip) = &item.equip else { continue };
-            let Some(slot) = Slot::of_equip(equip) else { continue };
-            let value = worth(&obs.me.job, slot, equip.attack.unwrap_or(0) + equip.refine * 2, equip.defense.unwrap_or(0) + equip.refine);
+            let Some(slot) = Slot::of_equip(equip) else {
+                continue;
+            };
+            let value = worth(
+                &obs.me.job,
+                slot,
+                equip.attack.unwrap_or(0) + equip.refine * 2,
+                equip.defense.unwrap_or(0) + equip.refine,
+            );
             worn.slots.insert(slot, (item.item_id, value));
             if slot == Slot::Weapon && equip.slots.len() == 2 {
                 worn.two_handed = true;
@@ -199,7 +242,9 @@ impl Worn {
     /// shield off; with one in hand, a shield can not be worn.
     pub fn gain(&self, slot: Slot, two_handed: bool, value: f32) -> f32 {
         match slot {
-            Slot::Weapon if two_handed => value - self.value(Slot::Weapon) - self.value(Slot::Shield),
+            Slot::Weapon if two_handed => {
+                value - self.value(Slot::Weapon) - self.value(Slot::Shield)
+            }
             Slot::Shield if self.two_handed => 0.0,
             _ => value - self.value(slot),
         }
@@ -218,7 +263,12 @@ pub fn better_in_bag(obs: &Observation) -> Option<&InventoryItem> {
             if slot == Slot::Weapon && !weapon_kind_kept(&obs.me.job, i, obs) {
                 return None;
             }
-            let value = worth(&obs.me.job, slot, equip.attack.unwrap_or(0) + equip.refine * 2, equip.defense.unwrap_or(0) + equip.refine);
+            let value = worth(
+                &obs.me.job,
+                slot,
+                equip.attack.unwrap_or(0) + equip.refine * 2,
+                equip.defense.unwrap_or(0) + equip.refine,
+            );
             let gain = worn.gain(slot, equip.slots.len() == 2, value);
             (gain > 0.5).then_some((gain, i))
         })
@@ -257,7 +307,9 @@ pub async fn shop_catalog(db: &Db) -> Result<Vec<ItemData>> {
     let mut ids: Vec<u32> = Vec::new();
     for name in SHOP_NAMES {
         for link in db.search("npcs", name, 200).await? {
-            let Ok(npc) = db.npc(&link.id_str()).await else { continue };
+            let Ok(npc) = db.npc(&link.id_str()).await else {
+                continue;
+            };
             for offer in npc.shop.iter().flatten() {
                 if let Some(id) = offer.item.id_u32()
                     && !ids.contains(&id)
@@ -290,12 +342,21 @@ pub fn best_upgrade(
 ) -> Option<Upgrade> {
     let worn = Worn::of(obs);
     let mut best: Option<Upgrade> = None;
-    for item in catalog.iter().filter(|i| wearable(i, obs) && next_job.is_none_or(|j| wearable_by(i, j))) {
-        let Some(slot) = Slot::of_location(item.location) else { continue };
+    for item in catalog
+        .iter()
+        .filter(|i| wearable(i, obs) && next_job.is_none_or(|j| wearable_by(i, j)))
+    {
+        let Some(slot) = Slot::of_location(item.location) else {
+            continue;
+        };
         let two_handed = item.location == LOC_TWO_HANDED;
         let value = worth(&obs.me.job, slot, item.attack as i32, item.defense as i32);
         let gain = worn.gain(slot, two_handed, value);
-        let needed = if slot == Slot::Weapon { MIN_WEAPON_GAIN.max(worn.value(Slot::Weapon) * 0.15) } else { DEF_WEIGHT };
+        let needed = if slot == Slot::Weapon {
+            MIN_WEAPON_GAIN.max(worn.value(Slot::Weapon) * 0.15)
+        } else {
+            DEF_WEIGHT
+        };
         if gain < needed {
             continue;
         }
@@ -311,7 +372,9 @@ pub fn best_upgrade(
         let better = match &best {
             None => true,
             // More gain first; for the same gain, the cheaper one (the same armor with a card slot costs more).
-            Some(b) => gain > b.gain + 0.1 || ((gain - b.gain).abs() <= 0.1 && shop.price < b.price),
+            Some(b) => {
+                gain > b.gain + 0.1 || ((gain - b.gain).abs() <= 0.1 && shop.price < b.price)
+            }
         };
         if better {
             best = Some(Upgrade {
@@ -323,7 +386,11 @@ pub fn best_upgrade(
                 shop: shop.clone(),
                 hops,
                 value,
-                replaces: if two_handed { worn.value(Slot::Weapon) + worn.value(Slot::Shield) } else { worn.value(slot) },
+                replaces: if two_handed {
+                    worn.value(Slot::Weapon) + worn.value(Slot::Shield)
+                } else {
+                    worn.value(slot)
+                },
             });
         }
     }
@@ -335,7 +402,12 @@ mod tests {
     use super::*;
     use crate::api::observation::InventoryItem;
 
-    fn equipped(item_id: u32, slots: &[&str], attack: Option<i32>, defense: Option<i32>) -> InventoryItem {
+    fn equipped(
+        item_id: u32,
+        slots: &[&str],
+        attack: Option<i32>,
+        defense: Option<i32>,
+    ) -> InventoryItem {
         InventoryItem {
             item_id,
             equipped: true,
@@ -351,12 +423,32 @@ mod tests {
         }
     }
 
-    fn sold(id: u32, name: &str, location: u32, weapon_type: &str, attack: u32, defense: u32, price: u64, map: &str) -> ItemData {
-        let place = ShopPlace { map: super::super::db::Link { id: map.into(), ..Default::default() }, price, ..Default::default() };
+    fn sold(
+        id: u32,
+        name: &str,
+        location: u32,
+        weapon_type: &str,
+        attack: u32,
+        defense: u32,
+        price: u64,
+        map: &str,
+    ) -> ItemData {
+        let place = ShopPlace {
+            map: super::super::db::Link {
+                id: map.into(),
+                ..Default::default()
+            },
+            price,
+            ..Default::default()
+        };
         ItemData {
             id,
             name_english: name.into(),
-            item_type: if weapon_type.is_empty() { "Armor".into() } else { "Weapon".into() },
+            item_type: if weapon_type.is_empty() {
+                "Armor".into()
+            } else {
+                "Weapon".into()
+            },
             weapon_type: weapon_type.into(),
             location,
             attack,
@@ -371,13 +463,19 @@ mod tests {
         let mut obs = Observation::default();
         obs.me.job = "Swordman".into();
         obs.me.base_level = 20;
-        obs.inventory = vec![equipped(1201, &["HandRight"], Some(17), None), equipped(2301, &["Armor"], None, Some(1))];
+        obs.inventory = vec![
+            equipped(1201, &["HandRight"], Some(17), None),
+            equipped(2301, &["Armor"], None, Some(1)),
+        ];
         obs
     }
 
     #[test]
     fn second_jobs_wear_what_their_first_job_wears() {
-        assert_eq!(job_flags("Knight"), job_flags("Knight") | job_flags("Swordsman"));
+        assert_eq!(
+            job_flags("Knight"),
+            job_flags("Knight") | job_flags("Swordsman")
+        );
         assert_ne!(job_flags("Knight") & job_flags("Swordman"), 0);
         assert_eq!(job_flags("Mage"), job_flags("Magician"));
         assert_eq!(job_flags("Novice"), 1);
@@ -388,8 +486,26 @@ mod tests {
         let catalog = vec![
             sold(1101, "Sword", LOC_WEAPON, "1hSword", 25, 0, 100, "prt_in"),
             sold(1107, "Blade", LOC_WEAPON, "1hSword", 53, 0, 2900, "prt_in"),
-            sold(1157, "Two-Handed Sword", LOC_TWO_HANDED, "2hSword", 160, 0, 60000, "prt_in"),
-            sold(2305, "Adventurer's Suit", LOC_ARMOR, "", 0, 3, 1000, "far_in"),
+            sold(
+                1157,
+                "Two-Handed Sword",
+                LOC_TWO_HANDED,
+                "2hSword",
+                160,
+                0,
+                60000,
+                "prt_in",
+            ),
+            sold(
+                2305,
+                "Adventurer's Suit",
+                LOC_ARMOR,
+                "",
+                0,
+                3,
+                1000,
+                "far_in",
+            ),
         ];
         let hops = HashMap::from([("prt_in".to_string(), 2)]);
         let up = best_upgrade(&catalog, &swordman(), 5000, &hops, None, &[]).unwrap();
@@ -420,7 +536,8 @@ mod tests {
     #[test]
     fn a_two_handed_weapon_pays_for_the_shield_it_takes_off() {
         let mut obs = swordman();
-        obs.inventory.push(equipped(2105, &["HandLeft"], None, Some(6)));
+        obs.inventory
+            .push(equipped(2105, &["HandLeft"], None, Some(6)));
         let worn = Worn::of(&obs);
         assert_eq!(worn.gain(Slot::Weapon, true, 30.0), 30.0 - 17.0 - 18.0);
         assert_eq!(worn.gain(Slot::Weapon, false, 30.0), 13.0);
@@ -446,7 +563,13 @@ mod tests {
         drop.index = 7;
         obs.inventory.push(drop);
         assert_eq!(better_in_bag(&obs).map(|i| i.index), Some(7));
-        obs.inventory.last_mut().unwrap().equip.as_mut().unwrap().can_equip = false;
+        obs.inventory
+            .last_mut()
+            .unwrap()
+            .equip
+            .as_mut()
+            .unwrap()
+            .can_equip = false;
         assert!(better_in_bag(&obs).is_none());
     }
 }

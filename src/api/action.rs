@@ -196,13 +196,34 @@ mod tests {
 
     #[test]
     fn serializes_with_type_tag() {
-        let json = serde_json::to_value(Action::Attack { target: 7, wait: false }).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "attack", "target": 7, "wait": false}));
+        let json = serde_json::to_value(Action::Attack {
+            target: 7,
+            wait: false,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "attack", "target": 7, "wait": false})
+        );
         let json = serde_json::to_value(Action::DialogClose).unwrap();
         assert_eq!(json, serde_json::json!({"type": "dialog_close"}));
-        let json = serde_json::to_value(Action::PartyOptions { exp_share: Some(true), item_pickup: None, item_share: None }).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "party_options", "exp_share": true}));
-        assert_eq!(serde_json::to_value(Action::BookingSearch).unwrap(), serde_json::json!({"type": "booking_search"}));
-        assert_eq!(serde_json::to_value(Action::RoomJoinNpc { npc: 9 }).unwrap(), serde_json::json!({"type": "room_join", "npc": 9}));
+        let json = serde_json::to_value(Action::PartyOptions {
+            exp_share: Some(true),
+            item_pickup: None,
+            item_share: None,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "party_options", "exp_share": true})
+        );
+        assert_eq!(
+            serde_json::to_value(Action::BookingSearch).unwrap(),
+            serde_json::json!({"type": "booking_search"})
+        );
+        assert_eq!(
+            serde_json::to_value(Action::RoomJoinNpc { npc: 9 }).unwrap(),
+            serde_json::json!({"type": "room_join", "npc": 9})
+        );
     }
 }

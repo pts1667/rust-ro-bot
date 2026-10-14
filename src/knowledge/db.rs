@@ -291,7 +291,9 @@ pub struct SearchResults {
 
 impl Db {
     pub fn new(base: &str, cache_dir: Option<PathBuf>) -> Result<Self> {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).build()?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()?;
         if let Some(dir) = &cache_dir {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -308,24 +310,44 @@ impl Db {
         if let Some(v) = self.memory.lock().unwrap().get(path) {
             return Ok(v.clone());
         }
-        let file = self.cache_dir.as_ref().map(|d| d.join(cache_file_name(path)));
+        let file = self
+            .cache_dir
+            .as_ref()
+            .map(|d| d.join(cache_file_name(path)));
         if let Some(file) = &file
             && let Ok(text) = std::fs::read_to_string(file)
             && let Ok(v) = serde_json::from_str::<Value>(&text)
         {
-            self.memory.lock().unwrap().insert(path.to_owned(), v.clone());
+            self.memory
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), v.clone());
             return Ok(v);
         }
-        let resp = self.http.get(format!("{}{}", self.base, path)).send().await.with_context(|| format!("GET {path}"))?;
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
         let status = resp.status();
-        let v: Value = resp.json().await.with_context(|| format!("parsing {path}"))?;
+        let v: Value = resp
+            .json()
+            .await
+            .with_context(|| format!("parsing {path}"))?;
         if !status.is_success() {
-            bail!("{path}: {status}: {}", v["error"].as_str().unwrap_or("error"));
+            bail!(
+                "{path}: {status}: {}",
+                v["error"].as_str().unwrap_or("error")
+            );
         }
         if let Some(file) = &file {
             let _ = std::fs::write(file, v.to_string());
         }
-        self.memory.lock().unwrap().insert(path.to_owned(), v.clone());
+        self.memory
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), v.clone());
         Ok(v)
     }
 
@@ -335,7 +357,8 @@ impl Db {
     }
 
     pub async fn map(&self, name: &str) -> Result<MapData> {
-        self.get_as(&format!("/db/maps/{}", urlencoding::encode(name))).await
+        self.get_as(&format!("/db/maps/{}", urlencoding::encode(name)))
+            .await
     }
 
     pub async fn mob(&self, id: u32) -> Result<MobData> {
@@ -348,20 +371,33 @@ impl Db {
 
     /// An NPC by its `map/name` id (the name with its `#suffix`).
     pub async fn npc(&self, id: &str) -> Result<NpcData> {
-        let path: Vec<String> = id.split('/').map(|p| urlencoding::encode(p).into_owned()).collect();
+        let path: Vec<String> = id
+            .split('/')
+            .map(|p| urlencoding::encode(p).into_owned())
+            .collect();
         self.get_as(&format!("/db/npcs/{}", path.join("/"))).await
     }
 
     /// Searches a category by name, `?q=`.
     pub async fn search(&self, category: &str, query: &str, limit: u32) -> Result<Vec<Link>> {
-        let path = format!("/db/{category}?q={}&limit={limit}", urlencoding::encode(query));
+        let path = format!(
+            "/db/{category}?q={}&limit={limit}",
+            urlencoding::encode(query)
+        );
         Ok(self.get_as::<SearchResults>(&path).await?.results)
     }
 
     /// A wiki page as Markdown, not cached on disk.
     pub async fn wiki(&self, page: &str) -> Result<String> {
         let page = page.trim_start_matches("/wiki/");
-        let url = format!("{}/wiki/{}", self.base, page.split('/').map(|p| urlencoding::encode(p).into_owned()).collect::<Vec<_>>().join("/"));
+        let url = format!(
+            "{}/wiki/{}",
+            self.base,
+            page.split('/')
+                .map(|p| urlencoding::encode(p).into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
         let resp = self.http.get(url).send().await?;
         if !resp.status().is_success() {
             bail!("wiki page {page}: {}", resp.status());
@@ -374,7 +410,13 @@ fn cache_file_name(path: &str) -> String {
     let mut name: String = path
         .trim_start_matches('/')
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     name.push_str(".json");
     name
@@ -386,7 +428,10 @@ mod tests {
 
     #[test]
     fn heal_amounts_come_from_the_script() {
-        let item = |script: &str| ItemData { script: script.into(), ..Default::default() };
+        let item = |script: &str| ItemData {
+            script: script.into(),
+            ..Default::default()
+        };
         assert_eq!(item("itemheal rand(45,65),0;").hp_heal(), Some(55.0));
         assert_eq!(item("itemheal 70,0;").hp_heal(), Some(70.0));
         assert_eq!(item("itemheal 0,rand(40,60);").hp_heal(), None);
@@ -395,15 +440,27 @@ mod tests {
 
     #[test]
     fn cache_names_are_flat() {
-        assert_eq!(cache_file_name("/db/maps/prt_fild08"), "db_maps_prt_fild08.json");
-        assert_eq!(cache_file_name("/db/items?q=red potion"), "db_items_q_red_potion.json");
+        assert_eq!(
+            cache_file_name("/db/maps/prt_fild08"),
+            "db_maps_prt_fild08.json"
+        );
+        assert_eq!(
+            cache_file_name("/db/items?q=red potion"),
+            "db_items_q_red_potion.json"
+        );
     }
 
     #[test]
     fn mob_flags() {
-        let mob = MobData { mode: 0x84, ..Default::default() };
+        let mob = MobData {
+            mode: 0x84,
+            ..Default::default()
+        };
         assert!(mob.aggressive());
-        let mob = MobData { mode: 0x83, ..Default::default() };
+        let mob = MobData {
+            mode: 0x83,
+            ..Default::default()
+        };
         assert!(!mob.aggressive());
     }
 }

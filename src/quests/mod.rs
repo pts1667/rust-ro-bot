@@ -72,7 +72,9 @@ impl Stage {
         let (x, y) = (obs.me.x, obs.me.y);
         self.inside
             && stage_map(self) == Some(obs.map.name.as_str())
-            && self.area.is_none_or(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
+            && self
+                .area
+                .is_none_or(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y))
     }
 }
 
@@ -87,9 +89,18 @@ pub enum Act {
     /// Stand on a test map without attacking until the script sends the bot elsewhere.
     Endure { map: &'static str },
     /// Walk to a cell (through a maze, onto a warp).
-    Walk { map: &'static str, x: u16, y: u16, menu: &'static [&'static str], answers: &'static [(&'static str, &'static str)] },
+    Walk {
+        map: &'static str,
+        x: u16,
+        y: u16,
+        menu: &'static [&'static str],
+        answers: &'static [(&'static str, &'static str)],
+    },
     /// Join the waiting room of an NPC and wait to be sent to the test.
-    Room { map: &'static str, npc: &'static str },
+    Room {
+        map: &'static str,
+        npc: &'static str,
+    },
     /// Dance to the calls of the map's announcements: on each, step onto the cell of the move it names last (`cells`),
     /// from the call holding `start` on. After the call holding `finish`, step onto `end` until sent off the floor.
     Dance(Dance),
@@ -186,7 +197,9 @@ impl Check {
             Check::OffMap(map) => obs.map.name != *map,
             Check::Count(id, n) => obs.item_count(*id) >= *n,
             Check::At(map, (x0, y0, x1, y1)) => {
-                obs.map.name == *map && (*x0..=*x1).contains(&obs.me.x) && (*y0..=*y1).contains(&obs.me.y)
+                obs.map.name == *map
+                    && (*x0..=*x1).contains(&obs.me.x)
+                    && (*y0..=*y1).contains(&obs.me.y)
             }
         }
     }
@@ -202,7 +215,14 @@ pub fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '^' && chars.clone().take(6).filter(|c| c.is_ascii_hexdigit()).count() == 6 {
+        if c == '^'
+            && chars
+                .clone()
+                .take(6)
+                .filter(|c| c.is_ascii_hexdigit())
+                .count()
+                == 6
+        {
             for _ in 0..6 {
                 chars.next();
             }
@@ -269,23 +289,42 @@ impl Quest {
     /// observation shows done already; on a test map, the stage on it.
     pub fn current_stage(&self, progress: &QuestProgress, obs: &Observation) -> usize {
         let mut i = progress.stage.min(self.stages.len());
-        let logged = |s: &Stage| s.log.iter().any(|id| obs.quests.iter().any(|q| q.id == *id));
+        let logged = |s: &Stage| {
+            s.log
+                .iter()
+                .any(|id| obs.quests.iter().any(|q| q.id == *id))
+        };
         let branch = self.branch(progress, obs);
         let off = |s: &Stage| matches!((s.branch, branch), (Some(a), Some(b)) if a != b);
         if let Some(l) = self.stages.iter().position(|s| !off(s) && logged(s)) {
             // The window is the truth when the memory is behind it, lost, or ahead past a stage whose entry is not shown.
-            let between = self.stages.get(l + 1..(i + 1).min(self.stages.len())).unwrap_or(&[]);
-            if i < l || between.iter().any(|s| !off(s) && !s.log.is_empty() && !logged(s)) {
+            let between = self
+                .stages
+                .get(l + 1..(i + 1).min(self.stages.len()))
+                .unwrap_or(&[]);
+            if i < l
+                || between
+                    .iter()
+                    .any(|s| !off(s) && !s.log.is_empty() && !logged(s))
+            {
                 i = l;
             }
         }
         // In the place of a test, the test is the stage (the remembered one when several happen there, else the
         // next); on a test map without places, the next test on it.
-        let here: Vec<usize> = (0..self.stages.len()).filter(|&t| !off(&self.stages[t]) && self.stages[t].area.is_some() && self.stages[t].holds_bot(obs)).collect();
+        let here: Vec<usize> = (0..self.stages.len())
+            .filter(|&t| {
+                !off(&self.stages[t])
+                    && self.stages[t].area.is_some()
+                    && self.stages[t].holds_bot(obs)
+            })
+            .collect();
         if let Some(&first) = here.first() {
             return here.iter().copied().find(|&t| t >= i).unwrap_or(first);
         }
-        if let Some(t) = (i..self.stages.len()).find(|&t| !off(&self.stages[t]) && self.stages[t].area.is_none() && self.stages[t].holds_bot(obs)) {
+        if let Some(t) = (i..self.stages.len()).find(|&t| {
+            !off(&self.stages[t]) && self.stages[t].area.is_none() && self.stages[t].holds_bot(obs)
+        }) {
             i = t;
         }
         // Once the window shows the quest, a stage of other entries is not the one at hand (another order of items, or
@@ -298,7 +337,9 @@ impl Quest {
                 continue;
             }
             let done = match &stage.act {
-                Act::Gather(need) => missing(need, progress, obs).is_empty() && zeny_short(need, obs) == 0,
+                Act::Gather(need) => {
+                    missing(need, progress, obs).is_empty() && zeny_short(need, obs) == 0
+                }
                 _ => stage.done.iter().any(|c| c.by_state() && c.holds(obs, &[])),
             };
             if !done {
@@ -314,7 +355,12 @@ impl Quest {
         progress.branch.as_deref().or_else(|| {
             self.stages
                 .iter()
-                .find(|s| s.branch.is_some() && s.log.iter().any(|id| obs.quests.iter().any(|q| q.id == *id)))
+                .find(|s| {
+                    s.branch.is_some()
+                        && s.log
+                            .iter()
+                            .any(|id| obs.quests.iter().any(|q| q.id == *id))
+                })
                 .and_then(|s| s.branch)
         })
     }
@@ -322,7 +368,11 @@ impl Quest {
     /// The stage to act on: the current one, or the one leading into its test room when the bot is not in it.
     pub fn actionable_stage(&self, progress: &QuestProgress, obs: &Observation) -> usize {
         let mut i = self.current_stage(progress, obs);
-        while i > 0 && i < self.stages.len() && self.stages[i].inside && stage_map(&self.stages[i]) != Some(obs.map.name.as_str()) {
+        while i > 0
+            && i < self.stages.len()
+            && self.stages[i].inside
+            && stage_map(&self.stages[i]) != Some(obs.map.name.as_str())
+        {
             i -= 1;
         }
         i
@@ -333,7 +383,9 @@ impl Quest {
         let mut v = Vec::new();
         for stage in &self.stages {
             match &stage.act {
-                Act::Gather(Need::Items(items) | Need::ItemsAndZeny(items, _)) => v.extend(items.iter().map(|(i, _)| *i)),
+                Act::Gather(Need::Items(items) | Need::ItemsAndZeny(items, _)) => {
+                    v.extend(items.iter().map(|(i, _)| *i))
+                }
                 Act::Talk(t) => v.extend(t.assigns.iter().flat_map(|s| s.iter().map(|(i, _)| *i))),
                 _ => {}
             }
@@ -359,7 +411,11 @@ pub fn kept_items(book: &QuestBook) -> Vec<u32> {
         .iter()
         .filter(|(_, p)| !p.done)
         .filter_map(|(id, p)| find(id).map(|q| (q, p)))
-        .flat_map(|(q, p)| q.items().into_iter().chain(p.assigned.iter().map(|(i, _)| *i)))
+        .flat_map(|(q, p)| {
+            q.items()
+                .into_iter()
+                .chain(p.assigned.iter().map(|(i, _)| *i))
+        })
         .collect();
     v.sort_unstable();
     v.dedup();
@@ -391,7 +447,11 @@ pub fn zeny_short(need: &Need, obs: &Observation) -> u64 {
 }
 
 /// The list among `sets` the dialogue names: the one with the most of its item names in the text.
-pub fn assigned_set(sets: &[Items], said: &[String], name_of: impl Fn(u32) -> Option<String>) -> Option<Vec<(u32, u32)>> {
+pub fn assigned_set(
+    sets: &[Items],
+    said: &[String],
+    name_of: impl Fn(u32) -> Option<String>,
+) -> Option<Vec<(u32, u32)>> {
     let text = normalize(&said.join(" "));
     let score = |set: &Items| {
         set.iter()
@@ -424,11 +484,36 @@ pub mod build {
     use super::*;
 
     fn stage(what: &'static str, act: Act, done: Vec<Check>, inside: bool) -> Stage {
-        Stage { what, act, done, wear: None, inside, back: Vec::new(), log: &[], area: None, branch: None }
+        Stage {
+            what,
+            act,
+            done,
+            wear: None,
+            inside,
+            back: Vec::new(),
+            log: &[],
+            area: None,
+            branch: None,
+        }
     }
 
     pub fn talk(what: &'static str, map: &'static str, npc: &'static str, x: u16, y: u16) -> Stage {
-        stage(what, Act::Talk(Talk { map, npc, x, y, menu: &[], answers: &[], assigns: &[], times: 1, recite: false }), Vec::new(), false)
+        stage(
+            what,
+            Act::Talk(Talk {
+                map,
+                npc,
+                x,
+                y,
+                menu: &[],
+                answers: &[],
+                assigns: &[],
+                times: 1,
+                recite: false,
+            }),
+            Vec::new(),
+            false,
+        )
     }
 
     pub fn gather(what: &'static str, items: Items) -> Stage {
@@ -440,12 +525,27 @@ pub mod build {
     }
 
     pub fn gather_zeny(what: &'static str, items: Items, zeny: u64) -> Stage {
-        let need = if items.is_empty() { Need::Zeny(zeny) } else { Need::ItemsAndZeny(items, zeny) };
+        let need = if items.is_empty() {
+            Need::Zeny(zeny)
+        } else {
+            Need::ItemsAndZeny(items, zeny)
+        };
         stage(what, Act::Gather(need), Vec::new(), false)
     }
 
     pub fn fight(what: &'static str, map: &'static str) -> Stage {
-        stage(what, Act::Fight(Fight { map, only: None, spare: &[], ahead: None, until: Vec::new() }), vec![Check::OffMap(map)], true)
+        stage(
+            what,
+            Act::Fight(Fight {
+                map,
+                only: None,
+                spare: &[],
+                ahead: None,
+                until: Vec::new(),
+            }),
+            vec![Check::OffMap(map)],
+            true,
+        )
     }
 
     pub fn dance(what: &'static str, dance: Dance) -> Stage {
@@ -457,7 +557,18 @@ pub mod build {
     }
 
     pub fn walk(what: &'static str, map: &'static str, x: u16, y: u16) -> Stage {
-        stage(what, Act::Walk { map, x, y, menu: &[], answers: &[] }, Vec::new(), false)
+        stage(
+            what,
+            Act::Walk {
+                map,
+                x,
+                y,
+                menu: &[],
+                answers: &[],
+            },
+            Vec::new(),
+            false,
+        )
     }
 
     pub fn room(what: &'static str, map: &'static str, npc: &'static str) -> Stage {
@@ -604,15 +715,31 @@ mod tests {
 
     #[test]
     fn colour_codes_and_case_are_ignored() {
-        assert_eq!(normalize("^3355FF' 3 Red Herb '^000000  now"), "' 3 red herb ' now");
+        assert_eq!(
+            normalize("^3355FF' 3 Red Herb '^000000  now"),
+            "' 3 red herb ' now"
+        );
     }
 
     #[test]
     fn the_named_item_list_is_found() {
         const A: Items = &[(507, 3), (705, 3)];
         const B: Items = &[(909, 5), (938, 5)];
-        let name = |id| Some(match id { 507 => "Red Herb", 705 => "Clover", 909 => "Jellopy", _ => "Sticky Mucus" }.to_owned());
-        let said = vec!["Bring me 5 ^0000FFJellopys^000000".to_owned(), "and 5 Sticky Mucus".to_owned()];
+        let name = |id| {
+            Some(
+                match id {
+                    507 => "Red Herb",
+                    705 => "Clover",
+                    909 => "Jellopy",
+                    _ => "Sticky Mucus",
+                }
+                .to_owned(),
+            )
+        };
+        let said = vec![
+            "Bring me 5 ^0000FFJellopys^000000".to_owned(),
+            "and 5 Sticky Mucus".to_owned(),
+        ];
         assert_eq!(assigned_set(&[A, B], &said, name), Some(B.to_vec()));
         assert_eq!(assigned_set(&[A, B], &["Hello".to_owned()], name), None);
     }
@@ -630,7 +757,9 @@ mod tests {
             for s in &q.stages {
                 if matches!(s.act, Act::Gather(Need::Assigned)) {
                     assert!(
-                        q.stages.iter().any(|t| matches!(&t.act, Act::Talk(t) if !t.assigns.is_empty())),
+                        q.stages
+                            .iter()
+                            .any(|t| matches!(&t.act, Act::Talk(t) if !t.assigns.is_empty())),
                         "{}: '{}' gathers an assigned list nobody assigns",
                         q.id,
                         s.what
@@ -659,43 +788,93 @@ mod tests {
             ],
         };
         let mut obs = Observation::default();
-        let p = QuestProgress { stage: 1, ..Default::default() };
+        let p = QuestProgress {
+            stage: 1,
+            ..Default::default()
+        };
         assert_eq!(q.current_stage(&p, &obs), 1);
-        obs.inventory.push(InventoryItem { item_id: 507, amount: 3, ..Default::default() });
+        obs.inventory.push(InventoryItem {
+            item_id: 507,
+            amount: 3,
+            ..Default::default()
+        });
         assert_eq!(q.current_stage(&p, &obs), 2);
-        obs.skills.push(Skill { name: "NV_FIRSTAID".into(), level: 1, ..Default::default() });
+        obs.skills.push(Skill {
+            name: "NV_FIRSTAID".into(),
+            level: 1,
+            ..Default::default()
+        });
         assert_eq!(q.current_stage(&p, &obs), 3);
         // A said-check never skips a stage.
-        assert_eq!(q.current_stage(&QuestProgress::default(), &Observation::default()), 0);
+        assert_eq!(
+            q.current_stage(&QuestProgress::default(), &Observation::default()),
+            0
+        );
     }
 
     #[test]
     fn the_quest_window_and_the_test_areas_tell_the_stage() {
         use crate::api::observation::QuestEntry;
         let q = find("job:Crusader").unwrap();
-        let at = |what: &str| q.stages.iter().position(|s| s.what.starts_with(what)).unwrap();
+        let at = |what: &str| {
+            q.stages
+                .iter()
+                .position(|s| s.what.starts_with(what))
+                .unwrap()
+        };
         let mut obs = Observation::default();
         obs.map.name = "prt_castle".into();
         let fresh = QuestProgress::default();
         // A Rosary in the bag: the first stage is done by itself.
-        obs.inventory.push(InventoryItem { item_id: 2608, amount: 1, ..Default::default() });
+        obs.inventory.push(InventoryItem {
+            item_id: 2608,
+            amount: 1,
+            ..Default::default()
+        });
         assert_eq!(q.current_stage(&fresh, &obs), at("ask the Senior Crusader"));
         // The window says the endurance test was passed although the memory was lost.
-        obs.quests.push(QuestEntry { id: 3011, ..Default::default() });
+        obs.quests.push(QuestEntry {
+            id: 3011,
+            ..Default::default()
+        });
         assert_eq!(q.current_stage(&fresh, &obs), at("answer Gabriel"));
         // On the test map, the place tells which test: the waiting room, then the corridor.
-        obs.quests = vec![QuestEntry { id: 3014, ..Default::default() }];
+        obs.quests = vec![QuestEntry {
+            id: 3014,
+            ..Default::default()
+        }];
         obs.map.name = "job_cru".into();
         (obs.me.x, obs.me.y) = (24, 169);
-        assert_eq!(q.actionable_stage(&fresh, &obs), at("wait for the battle test"));
+        assert_eq!(
+            q.actionable_stage(&fresh, &obs),
+            at("wait for the battle test")
+        );
         (obs.me.x, obs.me.y) = (168, 60);
         assert_eq!(q.actionable_stage(&fresh, &obs), at("defeat the undead"));
         (obs.me.x, obs.me.y) = (98, 40);
-        obs.quests = vec![QuestEntry { id: 3010, ..Default::default() }];
-        assert_eq!(q.actionable_stage(&fresh, &obs), at("walk past the monsters"));
+        obs.quests = vec![QuestEntry {
+            id: 3010,
+            ..Default::default()
+        }];
+        assert_eq!(
+            q.actionable_stage(&fresh, &obs),
+            at("walk past the monsters")
+        );
         // Back in the castle after the battle: the Senior Crusader.
         obs.map.name = "prt_castle".into();
-        obs.quests = vec![QuestEntry { id: 3015, ..Default::default() }];
-        assert_eq!(q.actionable_stage(&QuestProgress { stage: at("defeat the undead"), ..Default::default() }, &obs), at("become a Crusader"));
+        obs.quests = vec![QuestEntry {
+            id: 3015,
+            ..Default::default()
+        }];
+        assert_eq!(
+            q.actionable_stage(
+                &QuestProgress {
+                    stage: at("defeat the undead"),
+                    ..Default::default()
+                },
+                &obs
+            ),
+            at("become a Crusader")
+        );
     }
 }

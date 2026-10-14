@@ -34,13 +34,34 @@ pub fn job_path(job: &str) -> Option<(Vec<&'static str>, &'static str)> {
         ("Rogue", "Thief", "melee"),
     ];
     let (name, first, build) = PATHS.iter().find(|(name, _, _)| same_job(name, job))?;
-    let path = if first.is_empty() { vec![*name] } else { vec![*first, *name] };
+    let path = if first.is_empty() {
+        vec![*name]
+    } else {
+        vec![*first, *name]
+    };
     Some((path, build))
 }
 /// Every job `job_target` can name: the first jobs, then the second jobs.
 pub const JOBS: [&str; 19] = [
-    "Swordman", "Mage", "Archer", "Acolyte", "Merchant", "Thief", "Knight", "Crusader", "Wizard", "Sage", "Hunter", "Bard",
-    "Dancer", "Priest", "Monk", "Blacksmith", "Alchemist", "Assassin", "Rogue",
+    "Swordman",
+    "Mage",
+    "Archer",
+    "Acolyte",
+    "Merchant",
+    "Thief",
+    "Knight",
+    "Crusader",
+    "Wizard",
+    "Sage",
+    "Hunter",
+    "Bard",
+    "Dancer",
+    "Priest",
+    "Monk",
+    "Blacksmith",
+    "Alchemist",
+    "Assassin",
+    "Rogue",
 ];
 pub const STAT_BUILDS: [&str; 5] = ["melee", "tank", "caster", "archer", "balanced"];
 
@@ -63,6 +84,9 @@ pub struct StrategicState {
     pub avoid_mobs: Vec<String>,
     /// Short facts the model wants to keep.
     pub notes: Vec<String>,
+    /// Monsters other players warned about, left alone below a base level.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cautions: Vec<Caution>,
     /// The jobs a party role leads to, first then second: the model can not change `job_target` then.
     #[serde(skip)]
     pub pinned_jobs: Vec<String>,
@@ -80,10 +104,18 @@ impl Default for StrategicState {
             avoid_maps: Vec::new(),
             avoid_mobs: Vec::new(),
             notes: Vec::new(),
+            cautions: Vec::new(),
             pinned_jobs: Vec::new(),
             pinned_build: None,
         }
     }
+}
+
+/// A monster to leave alone below base level `until`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Caution {
+    pub monster: String,
+    pub until: u32,
 }
 
 /// What a patch did, for logs and the invalid-patch rate.
@@ -99,7 +131,7 @@ impl StrategicState {
         if self.objective.trim().is_empty() || looks_like_option_id(&self.objective) {
             self.objective = Self::default().objective;
         }
-        self.notes.retain(|n| !n.chars().any(|c| c.is_ascii_digit()));
+        self.notes.retain(|n| !has_number(n));
         if !STAT_BUILDS.contains(&self.stat_build.as_str()) {
             self.stat_build = Self::default().stat_build;
         }
@@ -127,24 +159,62 @@ impl StrategicState {
         };
         if let Some(next) = next {
             self.job_target = Some(next.clone());
-            self.objective = truncate(&format!("Play {} for the party: become a {next}.", self.pinned_jobs.join(", then ")), OBJECTIVE_LEN);
+            self.objective = truncate(
+                &format!(
+                    "Play {} for the party: become a {next}.",
+                    self.pinned_jobs.join(", then ")
+                ),
+                OBJECTIVE_LEN,
+            );
         }
     }
 
     /// Once the character has become its `job_target`, the target and the objective about it are done: clears the
     /// target and sets the next step as the objective. The model never rewrote them by itself.
     pub fn on_job(&mut self, job: &str) {
-        let Some(target) = &self.job_target else { return };
+        let Some(target) = &self.job_target else {
+            return;
+        };
         let same = same_job;
         if same(target, job) {
             self.job_target = None;
             self.objective = if FIRST_JOBS.iter().any(|j| same(j, job)) {
-                truncate(&format!("Grow strong as a {job}: reach job level 40, then pick a second job."), OBJECTIVE_LEN)
+                truncate(
+                    &format!("Grow strong as a {job}: reach job level 40, then pick a second job."),
+                    OBJECTIVE_LEN,
+                )
             } else {
-                truncate(&format!("Grow strong as a {job}: level up safely and gear up."), OBJECTIVE_LEN)
+                truncate(
+                    &format!("Grow strong as a {job}: level up safely and gear up."),
+                    OBJECTIVE_LEN,
+                )
             };
             self.repin_job(job);
         }
+    }
+
+    /// Leaves `monster` alone below base level `until`, as another player advised. A later word on it replaces the
+    /// earlier one.
+    pub fn caution(&mut self, monster: &str, until: u32) {
+        self.cautions
+            .retain(|c| !c.monster.eq_ignore_ascii_case(monster));
+        self.cautions.push(Caution {
+            monster: truncate(monster, NAME_LEN),
+            until,
+        });
+        while self.cautions.len() > MAX_AVOID {
+            self.cautions.remove(0);
+        }
+    }
+
+    /// The monsters to leave alone at base level `level`: those chosen, and those other players warned about.
+    pub fn avoided_mobs(&self, level: u32) -> Vec<String> {
+        let warned = self
+            .cautions
+            .iter()
+            .filter(|c| level < c.until)
+            .map(|c| c.monster.clone());
+        self.avoid_mobs.iter().cloned().chain(warned).collect()
     }
 
     /// Compact JSON for the prompt.
@@ -182,32 +252,42 @@ impl StrategicState {
                         self.stat_build = b;
                         true
                     }
-                    _ => value.is_null() && {
-                        self.stat_build = Self::default().stat_build;
-                        true
-                    },
+                    _ => {
+                        value.is_null() && {
+                            self.stat_build = Self::default().stat_build;
+                            true
+                        }
+                    }
                 },
                 "job_target" => match value {
                     Value::Null => {
                         self.job_target = None;
                         true
                     }
-                    Value::String(s) => match JOBS.iter().find(|j| j.eq_ignore_ascii_case(s.trim())) {
-                        Some(job) => {
-                            self.job_target = Some((*job).to_owned());
-                            true
+                    Value::String(s) => {
+                        match JOBS.iter().find(|j| j.eq_ignore_ascii_case(s.trim())) {
+                            Some(job) => {
+                                self.job_target = Some((*job).to_owned());
+                                true
+                            }
+                            None => false,
                         }
-                        None => false,
-                    },
+                    }
                     _ => false,
                 },
                 "avoid_maps" => merge_list(&mut self.avoid_maps, value, MAX_AVOID, NAME_LEN),
                 "avoid_mobs" => merge_list(&mut self.avoid_mobs, value, MAX_AVOID, NAME_LEN),
                 // Numbers in notes are copies of the observation, which the model then echoes every turn.
-                "notes" => !has_digits(value) && merge_list(&mut self.notes, value, MAX_NOTES, NOTE_LEN),
+                "notes" => {
+                    !has_digits(value) && merge_list(&mut self.notes, value, MAX_NOTES, NOTE_LEN)
+                }
                 _ => false,
             };
-            if ok { report.applied.push(key.clone()) } else { report.rejected.push(key.clone()) }
+            if ok {
+                report.applied.push(key.clone())
+            } else {
+                report.rejected.push(key.clone())
+            }
         }
         report
     }
@@ -260,8 +340,28 @@ fn merge_list(list: &mut Vec<String>, value: &Value, max: usize, max_len: usize)
     true
 }
 
+/// Whether a note holds a number. The digits of a map name (`prt_fild08`) are no number.
+pub fn has_number(note: &str) -> bool {
+    note.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| !w.contains('_') && w.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// Why a note would be refused, if it would.
+pub fn note_refusal(note: &str) -> Option<String> {
+    let note = note.trim();
+    if note.is_empty() {
+        Some("the note is empty".into())
+    } else if has_number(note) {
+        Some("notes hold no numbers (map names are fine): they are lessons, not counts".into())
+    } else if note.chars().count() > NOTE_LEN {
+        Some(format!("a note is at most {NOTE_LEN} characters"))
+    } else {
+        None
+    }
+}
+
 fn has_digits(value: &Value) -> bool {
-    let added = |s: &str| !s.trim_start().starts_with('-') && s.chars().any(|c| c.is_ascii_digit());
+    let added = |s: &str| !s.trim_start().starts_with('-') && has_number(s);
     match value {
         Value::String(s) => added(s),
         Value::Array(items) => items.iter().filter_map(Value::as_str).any(added),
@@ -289,7 +389,10 @@ mod tests {
 
     #[test]
     fn lists_are_merged_not_replaced() {
-        let mut s = StrategicState { avoid_mobs: vec!["Pupa".into()], ..Default::default() };
+        let mut s = StrategicState {
+            avoid_mobs: vec!["Pupa".into()],
+            ..Default::default()
+        };
         let r = s.apply_patch(&json!({"avoid_mobs": ["Wolf"]}));
         assert_eq!(r.applied, vec!["avoid_mobs"]);
         assert_eq!(s.avoid_mobs, vec!["Pupa", "Wolf"]);
@@ -310,7 +413,10 @@ mod tests {
 
     #[test]
     fn null_deletes_and_caps_hold() {
-        let mut s = StrategicState { job_target: Some("Mage".into()), ..Default::default() };
+        let mut s = StrategicState {
+            job_target: Some("Mage".into()),
+            ..Default::default()
+        };
         s.apply_patch(&json!({"job_target": null, "objective": "x".repeat(500)}));
         assert_eq!(s.job_target, None);
         assert_eq!(s.objective.len(), OBJECTIVE_LEN);
@@ -331,21 +437,48 @@ mod tests {
 
     #[test]
     fn notes_with_numbers_are_rejected() {
-        let mut s = StrategicState { notes: vec!["HP 74/89".into()], ..Default::default() };
-        assert_eq!(s.apply_patch(&json!({"notes": ["Lunatics flee", "22 kills"]})).rejected, vec!["notes"]);
-        assert_eq!(s.apply_patch(&json!({"notes": ["-HP 74/89", "Lunatics flee"]})).applied, vec!["notes"]);
+        let mut s = StrategicState {
+            notes: vec!["HP 74/89".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            s.apply_patch(&json!({"notes": ["Lunatics flee", "22 kills"]}))
+                .rejected,
+            vec!["notes"]
+        );
+        assert_eq!(
+            s.apply_patch(&json!({"notes": ["-HP 74/89", "Lunatics flee"]}))
+                .applied,
+            vec!["notes"]
+        );
         assert_eq!(s.notes, vec!["Lunatics flee"]);
+        assert_eq!(
+            s.apply_patch(&json!({"notes": ["Spores on prt_fild05 hit hard"]}))
+                .applied,
+            vec!["notes"]
+        );
+        assert!(
+            has_number("level 15 is enough")
+                && has_number("Lv15")
+                && !has_number("hunt on gef_dun01")
+        );
     }
 
     #[test]
     fn a_reached_job_target_is_cleared() {
-        let mut s = StrategicState { job_target: Some("Swordman".into()), ..Default::default() };
+        let mut s = StrategicState {
+            job_target: Some("Swordman".into()),
+            ..Default::default()
+        };
         s.on_job("Novice");
         assert_eq!(s.job_target.as_deref(), Some("Swordman"));
         s.on_job("Swordsman");
         assert_eq!(s.job_target, None);
         assert!(s.objective.contains("second job"));
-        assert_eq!(s.apply_patch(&json!({"job_target": "knight"})).applied, vec!["job_target"]);
+        assert_eq!(
+            s.apply_patch(&json!({"job_target": "knight"})).applied,
+            vec!["job_target"]
+        );
         assert_eq!(s.job_target.as_deref(), Some("Knight"));
     }
 
@@ -371,7 +504,9 @@ mod tests {
         s.pin_role(&["Acolyte", "Priest"], Some("caster"), "Novice");
         assert_eq!(s.job_target.as_deref(), Some("Acolyte"));
         assert_eq!(s.stat_build, "caster");
-        let r = s.apply_patch(&json!({"job_target": "Mage", "stat_build": "melee", "notes": "stay with the party"}));
+        let r = s.apply_patch(
+            &json!({"job_target": "Mage", "stat_build": "melee", "notes": "stay with the party"}),
+        );
         assert_eq!(r.rejected, vec!["job_target", "stat_build"]);
         assert_eq!(s.job_target.as_deref(), Some("Acolyte"));
         s.on_job("Acolyte");

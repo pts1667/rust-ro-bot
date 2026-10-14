@@ -28,7 +28,9 @@ pub fn candidate_steps(goal: &Goal, ctx: &PlanContext) -> Vec<Step> {
     maps.sort_unstable();
     maps.dedup();
     for map in maps {
-        steps.push(Step::Travel { map: map.to_owned() });
+        steps.push(Step::Travel {
+            map: map.to_owned(),
+        });
     }
     if let Goal::Hunt { map } = goal {
         steps.push(Step::Hunt { map: map.clone() });
@@ -37,9 +39,21 @@ pub fn candidate_steps(goal: &Goal, ctx: &PlanContext) -> Vec<Step> {
         steps.push(Step::ChangeJob { job: job.clone() });
     }
     match goal {
-        Goal::BuyGear { item, map, .. } => steps.push(Step::BuyGear { item: *item, map: map.clone() }),
-        Goal::BuyItem { item, amount, map, .. } => steps.push(Step::BuyItem { item: *item, amount: *amount, map: map.clone() }),
-        Goal::Quest { id, map, .. } => steps.push(Step::Quest { id: id.clone(), map: map.clone() }),
+        Goal::BuyGear { item, map, .. } => steps.push(Step::BuyGear {
+            item: *item,
+            map: map.clone(),
+        }),
+        Goal::BuyItem {
+            item, amount, map, ..
+        } => steps.push(Step::BuyItem {
+            item: *item,
+            amount: *amount,
+            map: map.clone(),
+        }),
+        Goal::Quest { id, map, .. } => steps.push(Step::Quest {
+            id: id.clone(),
+            map: map.clone(),
+        }),
         _ => {}
     }
     steps
@@ -79,7 +93,11 @@ pub fn plan(start: &WorldState, goal: &Goal, ctx: &PlanContext) -> Option<Vec<St
     None
 }
 
-fn unwind(nodes: &[(WorldState, Option<(usize, usize)>)], mut node: usize, steps: &[Step]) -> Vec<Step> {
+fn unwind(
+    nodes: &[(WorldState, Option<(usize, usize)>)],
+    mut node: usize,
+    steps: &[Step],
+) -> Vec<Step> {
     let mut out = Vec::new();
     while let Some((parent, step)) = nodes[node].1 {
         out.push(steps[step].clone());
@@ -94,14 +112,32 @@ mod tests {
     use super::*;
 
     fn town() -> WorldState {
-        WorldState { map: "prontera".into(), hp_ok: true, hp_full: true, job: "Novice".into(), ..Default::default() }
+        WorldState {
+            map: "prontera".into(),
+            hp_ok: true,
+            hp_full: true,
+            job: "Novice".into(),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn hunt_elsewhere_travels_first() {
-        let goal = Goal::Hunt { map: "prt_fild08".into() };
+        let goal = Goal::Hunt {
+            map: "prt_fild08".into(),
+        };
         let plan = plan(&town(), &goal, &PlanContext::default()).unwrap();
-        assert_eq!(plan, vec![Step::Travel { map: "prt_fild08".into() }, Step::Hunt { map: "prt_fild08".into() }]);
+        assert_eq!(
+            plan,
+            vec![
+                Step::Travel {
+                    map: "prt_fild08".into()
+                },
+                Step::Hunt {
+                    map: "prt_fild08".into()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -110,8 +146,23 @@ mod tests {
         ws.map = "prt_fild08".into();
         ws.hp_ok = false;
         ws.hp_full = false;
-        let plan = plan(&ws, &Goal::Hunt { map: "prt_fild08".into() }, &PlanContext::default()).unwrap();
-        assert_eq!(plan, vec![Step::Rest, Step::Hunt { map: "prt_fild08".into() }]);
+        let plan = plan(
+            &ws,
+            &Goal::Hunt {
+                map: "prt_fild08".into(),
+            },
+            &PlanContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan,
+            vec![
+                Step::Rest,
+                Step::Hunt {
+                    map: "prt_fild08".into()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -119,38 +170,87 @@ mod tests {
         let mut ws = town();
         ws.map = "new_1-1".into();
         ws.in_training = true;
-        let plan = plan(&ws, &Goal::Hunt { map: "prt_fild08".into() }, &PlanContext::default()).unwrap();
+        let plan = plan(
+            &ws,
+            &Goal::Hunt {
+                map: "prt_fild08".into(),
+            },
+            &PlanContext::default(),
+        )
+        .unwrap();
         assert_eq!(plan[0], Step::ExitTraining);
-        assert_eq!(plan.last(), Some(&Step::Hunt { map: "prt_fild08".into() }));
+        assert_eq!(
+            plan.last(),
+            Some(&Step::Hunt {
+                map: "prt_fild08".into()
+            })
+        );
     }
 
     #[test]
     fn buying_potions_sells_loot_when_poor() {
         let mut ws = town();
         ws.loot_to_sell = true;
-        let ctx = PlanContext { shop_map: Some("prt_fild05".into()), ..Default::default() };
+        let ctx = PlanContext {
+            shop_map: Some("prt_fild05".into()),
+            ..Default::default()
+        };
         let plan = plan(&ws, &Goal::BuyPotions, &ctx).unwrap();
         assert_eq!(
             plan,
-            vec![Step::Travel { map: "prt_fild05".into() }, Step::WalkToShop, Step::SellLoot, Step::BuyPotions]
+            vec![
+                Step::Travel {
+                    map: "prt_fild05".into()
+                },
+                Step::WalkToShop,
+                Step::SellLoot,
+                Step::BuyPotions
+            ]
         );
     }
 
     #[test]
     fn job_change_needs_readiness() {
-        let ctx = PlanContext { job_map: Some("prontera".into()), ..Default::default() };
-        let goal = Goal::JobChange { job: "Swordman".into() };
+        let ctx = PlanContext {
+            job_map: Some("prontera".into()),
+            ..Default::default()
+        };
+        let goal = Goal::JobChange {
+            job: "Swordman".into(),
+        };
         assert!(plan(&town(), &goal, &ctx).is_none());
         let mut ws = town();
         ws.job_change_ready = true;
-        assert_eq!(plan(&ws, &goal, &ctx).unwrap(), vec![Step::ChangeJob { job: "Swordman".into() }]);
+        assert_eq!(
+            plan(&ws, &goal, &ctx).unwrap(),
+            vec![Step::ChangeJob {
+                job: "Swordman".into()
+            }]
+        );
     }
 
     #[test]
     fn gear_is_bought_at_its_shop() {
-        let goal = Goal::BuyGear { item: 1107, name: "Blade".into(), map: "prt_in".into(), x: 1, y: 2 };
+        let goal = Goal::BuyGear {
+            item: 1107,
+            name: "Blade".into(),
+            map: "prt_in".into(),
+            x: 1,
+            y: 2,
+        };
         let plan = plan(&town(), &goal, &PlanContext::default()).unwrap();
-        assert_eq!(plan, vec![Step::Travel { map: "prt_in".into() }, Step::BuyGear { item: 1107, map: "prt_in".into() }]);
+        assert_eq!(
+            plan,
+            vec![
+                Step::Travel {
+                    map: "prt_in".into()
+                },
+                Step::BuyGear {
+                    item: 1107,
+                    map: "prt_in".into()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -159,12 +259,21 @@ mod tests {
         ws.has_potions = true;
         ws.ammo_low = true;
         ws.can_afford_potions = true;
-        let ctx = PlanContext { shop_map: Some("prontera".into()), ..Default::default() };
-        assert_eq!(plan(&ws, &Goal::BuyPotions, &ctx).unwrap(), vec![Step::WalkToShop, Step::BuyPotions]);
+        let ctx = PlanContext {
+            shop_map: Some("prontera".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan(&ws, &Goal::BuyPotions, &ctx).unwrap(),
+            vec![Step::WalkToShop, Step::BuyPotions]
+        );
     }
 
     #[test]
     fn satisfied_goal_needs_no_steps() {
-        assert_eq!(plan(&town(), &Goal::Rest, &PlanContext::default()), Some(vec![]));
+        assert_eq!(
+            plan(&town(), &Goal::Rest, &PlanContext::default()),
+            Some(vec![])
+        );
     }
 }

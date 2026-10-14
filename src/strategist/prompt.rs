@@ -79,13 +79,25 @@ pub fn observation(snap: &Snapshot) -> String {
     );
     match &snap.goal {
         Some(goal) => {
-            let _ = writeln!(o, "Current goal: {} for {} s. Last result: {}.", goal.label(), snap.goal_secs, snap.last_outcome);
+            let _ = writeln!(
+                o,
+                "Current goal: {} for {} s. Last result: {}.",
+                goal.label(),
+                snap.goal_secs,
+                snap.last_outcome
+            );
         }
         None => {
             let _ = writeln!(o, "No current goal. Last result: {}.", snap.last_outcome);
         }
     }
-    let top = |m: &[(String, u64)]| m.iter().take(4).map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ");
+    let top = |m: &[(String, u64)]| {
+        m.iter()
+            .take(4)
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let _ = writeln!(
         o,
         "Totals: {} kills ({}), {} deaths ({}).",
@@ -105,7 +117,10 @@ pub fn observation(snap: &Snapshot) -> String {
 
 /// The options, one per line.
 pub fn options_text(options: &[Opt]) -> String {
-    options.iter().map(|o| format!("- {}: {}\n", o.id, o.line)).collect()
+    options
+        .iter()
+        .map(|o| format!("- {}: {}\n", o.id, o.line))
+        .collect()
 }
 
 /// Where the task and the options go in a turn.
@@ -125,11 +140,23 @@ pub fn render_turn(order: Order, state: &str, observation: &str, options: &str) 
         Order::TaskFirst => format!(
             "TASK: choose the next goal. Call `commit` with your analysis of the OPTIONS, the option id it favours, and a state_patch.\n\nOPTIONS:\n{options}\nSTATE:\n{state}\n\nOBSERVATION:\n{observation}"
         ),
-        Order::DataFirst => format!("STATE:\n{state}\n\nOBSERVATION:\n{observation}\n\nOPTIONS:\n{options}"),
+        Order::DataFirst => {
+            format!("STATE:\n{state}\n\nOBSERVATION:\n{observation}\n\nOPTIONS:\n{options}")
+        }
     }
 }
 
 /// The user message of a real turn.
-pub fn user_message(order: Order, state: &StrategicState, snap: &Snapshot, options: &[Opt]) -> String {
-    render_turn(order, &state.to_prompt_json(), &observation(snap), &options_text(options))
+pub fn user_message(
+    order: Order,
+    state: &StrategicState,
+    snap: &Snapshot,
+    options: &[Opt],
+) -> String {
+    render_turn(
+        order,
+        &state.to_prompt_json(),
+        &observation(snap),
+        &options_text(options),
+    )
 }

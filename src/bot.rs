@@ -71,7 +71,13 @@ pub struct Bot {
 }
 
 impl Bot {
-    pub fn new(api: BotApi, name: String, knowledge: Knowledge, memory: Memory, helper: Option<Helper>) -> Self {
+    pub fn new(
+        api: BotApi,
+        name: String,
+        knowledge: Knowledge,
+        memory: Memory,
+        helper: Option<Helper>,
+    ) -> Self {
         Self {
             api,
             name,
@@ -100,14 +106,21 @@ impl Bot {
 
     /// Whether a long behaviour should stop: the strategist changed its mind, or someone waits for an answer.
     pub fn preempted(&self) -> bool {
-        (self.current_directive != 0 && self.latest_directive.load(Ordering::SeqCst) > self.current_directive)
+        (self.current_directive != 0
+            && self.latest_directive.load(Ordering::SeqCst) > self.current_directive)
             || self.talked_to.load(Ordering::SeqCst)
     }
 
     pub async fn observe(&self) -> Result<Observation> {
         let obs = self.api.observation(&self.name).await?;
-        let last = self.talk_seq.fetch_max(obs.last_message_seq(), Ordering::SeqCst);
-        if obs.messages.iter().any(|m| m.seq > last && crate::social::calls_for_answer(m, &obs.me.name)) {
+        let last = self
+            .talk_seq
+            .fetch_max(obs.last_message_seq(), Ordering::SeqCst);
+        if obs
+            .messages
+            .iter()
+            .any(|m| m.seq > last && crate::social::calls_for_answer(m, &obs.me.name))
+        {
             self.talked_to.store(true, Ordering::SeqCst);
         }
         Ok(obs)
@@ -128,7 +141,8 @@ impl Bot {
     }
 
     pub fn blacklist(&mut self, id: u64, secs: u64) {
-        self.blacklist.insert(id, Instant::now() + Duration::from_secs(secs));
+        self.blacklist
+            .insert(id, Instant::now() + Duration::from_secs(secs));
     }
 
     pub fn is_blacklisted(&mut self, id: u64) -> bool {

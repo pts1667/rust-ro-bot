@@ -55,7 +55,11 @@ impl BotApi {
             .timeout(Duration::from_secs(60))
             .build()
             .context("building HTTP client")?;
-        Ok(Self { http, base: base.trim_end_matches('/').to_owned(), key })
+        Ok(Self {
+            http,
+            base: base.trim_end_matches('/').to_owned(),
+            key,
+        })
     }
 
     pub async fn list(&self) -> Result<Vec<BotSummary>> {
@@ -65,7 +69,10 @@ impl BotApi {
 
     /// Creates a new character and puts it in the game.
     pub async fn create(&self, name: &str) -> Result<BotSummary> {
-        let req = self.http.post(self.url("/bots")).json(&json!({ "name": name }));
+        let req = self
+            .http
+            .post(self.url("/bots"))
+            .json(&json!({ "name": name }));
         let value = self.send(req).await?;
         serde_json::from_value(value).context("parsing created bot")
     }
@@ -78,19 +85,25 @@ impl BotApi {
     }
 
     pub async fn observation(&self, name: &str) -> Result<Observation> {
-        let req = self.http.get(self.url(&format!("/bots/{name}/observation")));
+        let req = self
+            .http
+            .get(self.url(&format!("/bots/{name}/observation")));
         let value = self.send(req).await?;
         serde_json::from_value(value).context("parsing observation")
     }
 
     pub async fn settings(&self) -> Result<Value> {
-        self.send(self.http.get(self.url("/bots/server/settings"))).await
+        self.send(self.http.get(self.url("/bots/server/settings")))
+            .await
     }
 
     /// Runs one action and returns the server's result.
     pub async fn act(&self, name: &str, action: &Action) -> Result<Value> {
         tracing::debug!(action = ?action, "act");
-        let req = self.http.post(self.url(&format!("/bots/{name}/actions"))).json(action);
+        let req = self
+            .http
+            .post(self.url(&format!("/bots/{name}/actions")))
+            .json(action);
         // No context wrapper: its Display would hide the server's reason, and callers know the action.
         self.send(req).await
     }
@@ -100,7 +113,11 @@ impl BotApi {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<Value> {
-        let resp = req.bearer_auth(&self.key).send().await.context("sending request to the bot API")?;
+        let resp = req
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .context("sending request to the bot API")?;
         let status = resp.status();
         let text = resp.text().await.context("reading response body")?;
 

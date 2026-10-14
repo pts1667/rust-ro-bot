@@ -31,8 +31,17 @@ pub enum HelpOutcome {
 
 impl Bot {
     /// One step of helping `who` with `task`, asked for since `since`.
-    pub async fn help(&mut self, obs: &Observation, who: &str, task: HelpTask, since: Instant) -> Result<HelpOutcome> {
-        let member = obs.party.as_ref().is_some_and(|p| p.members.iter().any(|m| m.name.eq_ignore_ascii_case(who)));
+    pub async fn help(
+        &mut self,
+        obs: &Observation,
+        who: &str,
+        task: HelpTask,
+        since: Instant,
+    ) -> Result<HelpOutcome> {
+        let member = obs
+            .party
+            .as_ref()
+            .is_some_and(|p| p.members.iter().any(|m| m.name.eq_ignore_ascii_case(who)));
         match task {
             HelpTask::Follow if member && self.party.is_some() => {
                 // The party already knows how to follow a member
@@ -43,7 +52,9 @@ impl Bot {
             HelpTask::Invite => self.invite(obs, who).await,
             HelpTask::JoinParty => Ok(self.join_party_of(obs, who).await),
             HelpTask::GivePotions => {
-                let Some(player) = obs.player_near(who, SIGHT) else { return Ok(HelpOutcome::Failed(format!("{who} is out of sight"))) };
+                let Some(player) = obs.player_near(who, SIGHT) else {
+                    return Ok(HelpOutcome::Failed(format!("{who} is out of sight")));
+                };
                 if self.knowledge.heal_items(obs) <= SPARE_ABOVE {
                     return Ok(HelpOutcome::Failed("no potions to spare".into()));
                 }
@@ -56,13 +67,19 @@ impl Bot {
     }
 
     /// Walks along with someone outside the party, fighting what attacks either, until told to stop or for a while.
-    async fn walk_along(&mut self, obs: &Observation, who: &str, since: Instant) -> Result<HelpOutcome> {
+    async fn walk_along(
+        &mut self,
+        obs: &Observation,
+        who: &str,
+        since: Instant,
+    ) -> Result<HelpOutcome> {
         if self.social.stopped(who, since) {
             return Ok(HelpOutcome::Finished);
         }
         if since.elapsed() >= FOLLOW_FOR {
             if obs.player_near(who, SIGHT).is_some() {
-                self.say_on(Channel::Public, who, "I have to go now, good luck!").await;
+                self.say_on(Channel::Public, who, "I have to go now, good luck!")
+                    .await;
             }
             return Ok(HelpOutcome::Finished);
         }
@@ -107,7 +124,11 @@ impl Bot {
             if obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE {
                 return Ok(HelpOutcome::Failed("cannot create a party yet".into()));
             }
-            if self.social.last_create.is_some_and(|at| at.elapsed() < CREATE_WAIT) {
+            if self
+                .social
+                .last_create
+                .is_some_and(|at| at.elapsed() < CREATE_WAIT)
+            {
                 Bot::pause(500).await;
                 return Ok(HelpOutcome::Going);
             }
@@ -118,32 +139,55 @@ impl Bot {
             self.social.create_tries += 1;
             self.social.last_create = Some(Instant::now());
             tracing::info!(%name, %who, "creating a party to invite someone");
-            self.act(Action::PartyCreate { name, item_pickup: true, item_share: false }).await.ok();
+            self.act(Action::PartyCreate {
+                name,
+                item_pickup: true,
+                item_share: false,
+            })
+            .await
+            .ok();
             return Ok(HelpOutcome::Going);
         };
-        if party.members.iter().any(|m| m.name.eq_ignore_ascii_case(who)) {
+        if party
+            .members
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(who))
+        {
             return Ok(HelpOutcome::Finished);
         }
-        if !party.members.iter().any(|m| m.leader && m.name.eq_ignore_ascii_case(&obs.me.name)) {
+        if !party
+            .members
+            .iter()
+            .any(|m| m.leader && m.name.eq_ignore_ascii_case(&obs.me.name))
+        {
             return Ok(HelpOutcome::Failed("only the leader invites".into()));
         }
         if party.members.len() >= MAX_MEMBERS {
             return Ok(HelpOutcome::Failed("the party is full".into()));
         }
         self.social.create_tries = 0;
-        Ok(match self.act(Action::PartyInvite { name: who.to_owned() }).await {
-            Ok(_) => {
-                tracing::info!(%who, "invited to the party, as asked");
-                HelpOutcome::Finished
-            }
-            Err(error) => HelpOutcome::Failed(format!("cannot invite {who}: {error}")),
-        })
+        Ok(
+            match self
+                .act(Action::PartyInvite {
+                    name: who.to_owned(),
+                })
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(%who, "invited to the party, as asked");
+                    HelpOutcome::Finished
+                }
+                Err(error) => HelpOutcome::Failed(format!("cannot invite {who}: {error}")),
+            },
+        )
     }
 
     /// Gets ready to take the invitation of `who`: out of a party of one, then waiting for it.
     async fn join_party_of(&mut self, obs: &Observation, who: &str) -> HelpOutcome {
         match &obs.party {
-            Some(p) if p.members.iter().any(|m| m.name.eq_ignore_ascii_case(who)) => HelpOutcome::Finished,
+            Some(p) if p.members.iter().any(|m| m.name.eq_ignore_ascii_case(who)) => {
+                HelpOutcome::Finished
+            }
             Some(p) if p.members.len() == 1 => {
                 if obs.booking.is_some() {
                     self.act(Action::BookingDelete).await.ok();

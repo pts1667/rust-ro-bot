@@ -24,11 +24,31 @@ pub enum Goal {
     /// Leave the training grounds for a town.
     LeaveTraining,
     /// Buy a piece of equipment at the shop at `x`, `y` on `map` and wear it.
-    BuyGear { item: u32, name: String, map: String, x: u16, y: u16 },
+    BuyGear {
+        item: u32,
+        name: String,
+        map: String,
+        x: u16,
+        y: u16,
+    },
     /// Have `amount` of an item, bought at the shop at `x`, `y` on `map` (for a quest).
-    BuyItem { item: u32, amount: u32, name: String, map: String, x: u16, y: u16 },
+    BuyItem {
+        item: u32,
+        amount: u32,
+        name: String,
+        map: String,
+        x: u16,
+        y: u16,
+    },
     /// Do the stage `stage` of a quest, on `map` (at `x`, `y` when it is an NPC).
-    Quest { id: String, stage: usize, what: String, map: String, x: u16, y: u16 },
+    Quest {
+        id: String,
+        stage: usize,
+        what: String,
+        map: String,
+        x: u16,
+        y: u16,
+    },
     /// Do what `who` asked in chat (see `social`). Not planned: the agent runs it until it is over.
     Help { who: String, task: HelpTask },
 }
@@ -69,13 +89,17 @@ impl Goal {
             // The server may spell it differently ("Swordsman", "Magician"): the first three letters are enough.
             Goal::JobChange { job } => {
                 ws.job.eq_ignore_ascii_case(job)
-                    || (ws.job.len() >= 3 && job.len() >= 3 && ws.job[..3].eq_ignore_ascii_case(&job[..3]))
+                    || (ws.job.len() >= 3
+                        && job.len() >= 3
+                        && ws.job[..3].eq_ignore_ascii_case(&job[..3]))
             }
             Goal::Explore { map } => &ws.map == map,
             Goal::LeaveTraining => !ws.in_training,
             Goal::BuyGear { item, .. } => ws.items.contains_key(item),
             Goal::BuyItem { item, amount, .. } => ws.items.get(item).is_some_and(|n| n >= amount),
-            Goal::Quest { id, stage, .. } => ws.quest_stages.get(id).copied().unwrap_or(0) != *stage,
+            Goal::Quest { id, stage, .. } => {
+                ws.quest_stages.get(id).copied().unwrap_or(0) != *stage
+            }
             Goal::Help { .. } => false,
         }
     }
@@ -100,9 +124,11 @@ impl Goal {
     /// Map this goal needs to stand on, if any.
     pub fn map(&self) -> Option<&str> {
         match self {
-            Goal::Hunt { map } | Goal::Explore { map } | Goal::BuyGear { map, .. } | Goal::BuyItem { map, .. } | Goal::Quest { map, .. } => {
-                Some(map)
-            }
+            Goal::Hunt { map }
+            | Goal::Explore { map }
+            | Goal::BuyGear { map, .. }
+            | Goal::BuyItem { map, .. }
+            | Goal::Quest { map, .. } => Some(map),
             _ => None,
         }
     }
@@ -110,7 +136,9 @@ impl Goal {
     /// The spot on its map the goal is about, so a trip into a map of several rooms takes the right door.
     pub fn spot(&self) -> Option<(String, (u16, u16))> {
         match self {
-            Goal::BuyGear { map, x, y, .. } | Goal::BuyItem { map, x, y, .. } => Some((map.clone(), (*x, *y))),
+            Goal::BuyGear { map, x, y, .. } | Goal::BuyItem { map, x, y, .. } => {
+                Some((map.clone(), (*x, *y)))
+            }
             Goal::Quest { map, x, y, .. } if (*x, *y) != (0, 0) => Some((map.clone(), (*x, *y))),
             _ => None,
         }
@@ -123,8 +151,13 @@ mod tests {
 
     #[test]
     fn job_change_accepts_server_spellings() {
-        let goal = Goal::JobChange { job: "Swordman".into() };
-        let ws = |job: &str| WorldState { job: job.into(), ..Default::default() };
+        let goal = Goal::JobChange {
+            job: "Swordman".into(),
+        };
+        let ws = |job: &str| WorldState {
+            job: job.into(),
+            ..Default::default()
+        };
         assert!(goal.satisfied(&ws("Swordsman")));
         assert!(goal.satisfied(&ws("swordman")));
         assert!(!goal.satisfied(&ws("Novice")));

@@ -38,9 +38,18 @@ pub fn max_weight(job: &str, str: u32) -> u32 {
 
 /// Step failures after which retrying the goal is pointless.
 fn hopeless(reason: &str) -> bool {
-    ["no monsters", "nothing safe", "no known route", "no Job Master", "no potion shop", "does not sell", "buys none", "cannot afford"]
-        .iter()
-        .any(|k| reason.contains(k))
+    [
+        "no monsters",
+        "nothing safe",
+        "no known route",
+        "no Job Master",
+        "no potion shop",
+        "does not sell",
+        "buys none",
+        "cannot afford",
+    ]
+    .iter()
+    .any(|k| reason.contains(k))
 }
 
 struct Run {
@@ -96,13 +105,19 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
     let started = Instant::now();
     bot.memory.visited_maps.insert(first.map.name.clone());
     bot.social.start(&first);
-    bot.talk_seq.store(first.last_message_seq(), std::sync::atomic::Ordering::SeqCst);
+    bot.talk_seq.store(
+        first.last_message_seq(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
 
     let result = loop {
         if stop.load(Ordering::SeqCst) {
             break Ok(());
         }
-        if args.minutes.is_some_and(|m| started.elapsed() >= Duration::from_secs(m * 60)) {
+        if args
+            .minutes
+            .is_some_and(|m| started.elapsed() >= Duration::from_secs(m * 60))
+        {
             tracing::info!("time is up");
             break Ok(());
         }
@@ -110,7 +125,9 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
             Ok(obs) => obs,
             Err(error) => {
                 tracing::warn!(%error, "observation failed");
-                if ApiError::status_of(&error).is_some_and(|s| s.as_u16() == 409 || s.as_u16() == 404) {
+                if ApiError::status_of(&error)
+                    .is_some_and(|s| s.as_u16() == 409 || s.as_u16() == 404)
+                {
                     crate::ensure_connected(&bot.api, &bot.name).await.ok();
                 }
                 Bot::pause(2000).await;
@@ -139,7 +156,13 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
                     && let Some(goal) = r.goal.clone()
                 {
                     r.errors_in_row = 0;
-                    give_up(&mut bot, &handle, &mut r, &goal, &format!("keeps failing: {error}"));
+                    give_up(
+                        &mut bot,
+                        &handle,
+                        &mut r,
+                        &goal,
+                        &format!("keeps failing: {error}"),
+                    );
                 }
                 Bot::pause(1500).await;
             }
@@ -161,11 +184,15 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
 fn detect_events(bot: &mut Bot, handle: &Handle, r: &mut Run, obs: &Observation) {
     let Some(prev) = &r.prev else { return };
     if obs.me.base_level > prev.me.base_level {
-        bot.memory.note(format!("reached base level {} on {}", obs.me.base_level, obs.map.name));
+        bot.memory.note(format!(
+            "reached base level {} on {}",
+            obs.me.base_level, obs.map.name
+        ));
         handle.events.send(Event::LevelUp).ok();
     }
     if obs.me.job_level > prev.me.job_level {
-        bot.memory.note(format!("reached job level {}", obs.me.job_level));
+        bot.memory
+            .note(format!("reached job level {}", obs.me.job_level));
         handle.events.send(Event::JobLevelUp).ok();
     }
     if obs.map.name != prev.map.name {
@@ -200,7 +227,11 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
     if bot.gear_reflexes(&obs).await? {
         return Ok(());
     }
-    let doing = r.goal.as_ref().map(|g| g.label()).unwrap_or_else(|| "looking around".into());
+    let doing = r
+        .goal
+        .as_ref()
+        .map(|g| g.label())
+        .unwrap_or_else(|| "looking around".into());
     if bot.converse(&obs, &doing).await {
         // The strategist decides with the request in its snapshot
         let ws = world_state(bot, &obs);
@@ -237,7 +268,8 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         bot.memory.counters.llm_calls = r.llm_base.llm_calls + llm.llm_calls;
         bot.memory.counters.llm_invalid = r.llm_base.llm_invalid + llm.llm_invalid;
         bot.memory.counters.llm_prompt_chars = r.llm_base.llm_prompt_chars + llm.llm_prompt_chars;
-        bot.answer_requests(&obs, &d.asked, &d.option, Some(&d.goal), &d.refusals).await;
+        bot.answer_requests(&obs, &d.asked, &d.option, Some(&d.goal), &d.refusals)
+            .await;
         // The same favour asked again is a new one; a later directive for the same request is not
         if d.option.starts_with("ask:") && d.option != r.taken_ask {
             r.ended_favour = None;
@@ -253,6 +285,13 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         }
         if r.ended_favour.as_ref() == Some(&d.goal) {
             tracing::debug!(goal = %d.goal.label(), "a favour that is over, not taken up again");
+        } else if r
+            .failures
+            .iter()
+            .any(|(g, at)| *g == d.goal && at.elapsed() < FAILURE_MEMORY)
+        {
+            // Decided before the goal failed
+            tracing::debug!(goal = %d.goal.label(), "a goal given up lately, not taken up again");
         } else if r.goal.as_ref() != Some(&d.goal) {
             tracing::info!(goal = %d.goal.label(), reason = %d.reason, by_llm = d.by_llm, "new goal");
             r.goal = Some(d.goal);
@@ -272,7 +311,8 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
             }
             HelpOutcome::Failed(reason) => {
                 tracing::info!(goal = %goal.label(), %reason, "favour given up");
-                bot.memory.note(format!("could not {}: {reason}", goal.label()));
+                bot.memory
+                    .note(format!("could not {}: {reason}", goal.label()));
                 r.last_outcome = format!("{} failed: {reason}", goal.label());
                 Event::GoalFailed(format!("{}: {reason}", goal.label()))
             }
@@ -311,18 +351,29 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
     } else {
         bot.memory.potion_shop.as_ref().map(|s| s.map.clone())
     };
-    let ctx = PlanContext { shop_map, job_map: Some(JOB_MAP.to_owned()), hops: Vec::new() };
+    let ctx = PlanContext {
+        shop_map,
+        job_map: Some(JOB_MAP.to_owned()),
+        hops: Vec::new(),
+    };
     bot.travel_spot = goal.spot();
     ws.hunted = false;
     let Some(steps) = plan(&ws, &goal, &ctx) else {
         give_up(bot, handle, r, &goal, "no plan reaches it");
         return Ok(());
     };
-    let Some(step) = steps.first().cloned() else { return Ok(()) };
+    let Some(step) = steps.first().cloned() else {
+        return Ok(());
+    };
     // A leader does not pull more while a member in sight is low on HP and nothing attacks it: it gets its HP back.
     if matches!(step, Step::Hunt { .. })
         && bot.member_in_trouble(&obs)
-        && crate::party::attacking_a_member(&obs, &crate::party::member_ids(&obs), crate::party::SIGHT).is_none()
+        && crate::party::attacking_a_member(
+            &obs,
+            &crate::party::member_ids(&obs),
+            crate::party::SIGHT,
+        )
+        .is_none()
     {
         Bot::pause(1500).await;
         return Ok(());
@@ -341,7 +392,11 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
             tracing::info!(?step, "step preempted by a new goal");
             r.last_outcome = format!("{step:?} interrupted for a new goal");
         }
-        Outcome::Failed(reason) if matches!(step, Step::Hunt { .. }) && !hopeless(&reason) && !reason.contains("died") => {
+        Outcome::Failed(reason)
+            if matches!(step, Step::Hunt { .. })
+                && !hopeless(&reason)
+                && !reason.contains("died") =>
+        {
             // One target that runs off or sits out of reach says nothing about the map: it is blacklisted, go on.
             tracing::info!(%reason, "target skipped");
             r.last_outcome = format!("target skipped: {reason}");
@@ -363,17 +418,33 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
 
 fn give_up(bot: &mut Bot, handle: &Handle, r: &mut Run, goal: &Goal, reason: &str) {
     tracing::info!(goal = %goal.label(), %reason, "goal given up");
-    bot.memory.note(format!("gave up '{}': {reason}", goal.label()));
+    bot.memory
+        .note(format!("gave up '{}': {reason}", goal.label()));
     r.failures.push((goal.clone(), Instant::now()));
     r.goal = None;
     r.step_failures = 0;
-    handle.events.send(Event::GoalFailed(format!("{}: {reason}", goal.label()))).ok();
+    // The strategist answers the event at once, maybe before the next snapshot: it must not choose the goal again.
+    handle.snapshots.send_modify(|snap| {
+        if let Some(snap) = snap {
+            snap.recent_failures.push(goal.clone());
+            snap.goal = None;
+        }
+    });
+    handle
+        .events
+        .send(Event::GoalFailed(format!("{}: {reason}", goal.label())))
+        .ok();
 }
 
 fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
     let extra = Extra {
         near_shop: bot.near_shop,
-        potion_price: bot.memory.potion_shop.as_ref().map(|s| s.price).unwrap_or(50),
+        potion_price: bot
+            .memory
+            .potion_shop
+            .as_ref()
+            .map(|s| s.price)
+            .unwrap_or(50),
         heal_hp: bot.knowledge.heal_stock(obs),
         keep: bot.keep.clone(),
         quest_stages: crate::quests::stages(&bot.memory.quests, obs),
@@ -382,7 +453,11 @@ fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
     if bot.stats_stuck_at == Some(obs.me.status_points) {
         ws.status_points = false;
     }
-    if bot.skills_stuck_at.as_ref().is_some_and(|(job, lvl)| *job == obs.me.job && *lvl == obs.me.job_level) {
+    if bot
+        .skills_stuck_at
+        .as_ref()
+        .is_some_and(|(job, lvl)| *job == obs.me.job && *lvl == obs.me.job_level)
+    {
         ws.skill_points = false;
     }
     ws
@@ -404,8 +479,18 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
         weight_frac: obs.me.weight as f32 / max_weight(&obs.me.job, obs.me.stats.str) as f32,
         heal_hp: bot.knowledge.heal_stock(obs),
         heal_items: bot.knowledge.heal_items(obs),
-        loot_items: obs.inventory.iter().filter(|i| is_loot_item(i, &bot.keep)).map(|i| i.amount).sum(),
-        potion_price: bot.memory.potion_shop.as_ref().map(|s| s.price).unwrap_or(0),
+        loot_items: obs
+            .inventory
+            .iter()
+            .filter(|i| is_loot_item(i, &bot.keep))
+            .map(|i| i.amount)
+            .sum(),
+        potion_price: bot
+            .memory
+            .potion_shop
+            .as_ref()
+            .map(|s| s.price)
+            .unwrap_or(0),
         kills: bot.memory.counters.kills,
         deaths: bot.memory.counters.deaths,
         kills_by_mob: sorted(&bot.memory.kills_by_mob),
@@ -418,7 +503,12 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
         quests: bot.memory.quests.clone(),
         requests: bot.social.pending.clone(),
         party_play: bot.party.is_some(),
-        friends: bot.party.as_ref().map(|p| p.config.friends.clone()).unwrap_or_default(),
+        friends: bot
+            .party
+            .as_ref()
+            .map(|p| p.config.friends.clone())
+            .unwrap_or_default(),
+        notes: bot.memory.strategy.notes.clone(),
     };
     handle.snapshots.send_replace(Some(snap));
 }
@@ -426,16 +516,36 @@ fn publish(bot: &Bot, handle: &Handle, r: &mut Run, obs: &Observation, ws: &Worl
 async fn print_report(bot: &Bot, r: &Run, started: Instant) {
     let obs = bot.observe().await.ok();
     let c = &bot.memory.counters;
-    println!("\n== run report ({} min) ==", started.elapsed().as_secs() / 60);
+    println!(
+        "\n== run report ({} min) ==",
+        started.elapsed().as_secs() / 60
+    );
     if let Some(obs) = &obs {
         println!(
             "{} the {}: base level {} -> {}, job level {} -> {}, zeny {}, on {}",
-            obs.me.name, obs.me.job, r.start_level, obs.me.base_level, r.start_job_level, obs.me.job_level, obs.me.zeny, obs.map.name
+            obs.me.name,
+            obs.me.job,
+            r.start_level,
+            obs.me.base_level,
+            r.start_job_level,
+            obs.me.job_level,
+            obs.me.zeny,
+            obs.map.name
         );
     }
-    println!("kills {} | deaths {} | loot picked {} | zeny from sales {}", c.kills, c.deaths, c.loot_picked, c.zeny_earned);
-    let avg = if c.llm_calls > 0 { c.llm_prompt_chars / c.llm_calls } else { 0 };
-    println!("LLM steps {} | failed or partly invalid {} | avg prompt {} chars", c.llm_calls, c.llm_invalid, avg);
+    println!(
+        "kills {} | deaths {} | loot picked {} | zeny from sales {}",
+        c.kills, c.deaths, c.loot_picked, c.zeny_earned
+    );
+    let avg = if c.llm_calls > 0 {
+        c.llm_prompt_chars / c.llm_calls
+    } else {
+        0
+    };
+    println!(
+        "LLM steps {} | failed or partly invalid {} | avg prompt {} chars",
+        c.llm_calls, c.llm_invalid, avg
+    );
     println!("objective: {}", bot.memory.strategy.objective);
     println!("notes: {:?}", bot.memory.strategy.notes);
 }
@@ -452,7 +562,9 @@ mod tests {
 
     #[test]
     fn hopeless_reasons_are_recognised() {
-        assert!(hopeless("nothing safe to fight on prt_fild02 (40 monsters)"));
+        assert!(hopeless(
+            "nothing safe to fight on prt_fild02 (40 monsters)"
+        ));
         assert!(!hopeless("fight with Poring took too long"));
     }
 }

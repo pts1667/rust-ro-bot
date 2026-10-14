@@ -14,8 +14,8 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 use smolgent::{
-    AgentEvent, AgentEventReceiver, ChatSession, CompactionConfig, NotificationConfig, SessionConfig, TelemetryConfig,
-    TelemetryEvent, TelemetryEventReceiver, Tool, ToolRegistry,
+    AgentEvent, AgentEventReceiver, ChatSession, CompactionConfig, NotificationConfig,
+    SessionConfig, TelemetryConfig, TelemetryEvent, TelemetryEventReceiver, Tool, ToolRegistry,
 };
 
 use super::llm::{LLM_TIMEOUT, Llm};
@@ -52,7 +52,13 @@ impl History {
 
     /// `model_compaction` first asks the model to compact (the trim still follows if it falls short); `trace` also
     /// records every request and response. Both for `history-check`.
-    pub fn with(llm: &Llm, compact_at: usize, compact_to: usize, model_compaction: bool, trace: bool) -> Self {
+    pub fn with(
+        llm: &Llm,
+        compact_at: usize,
+        compact_to: usize,
+        model_compaction: bool,
+        trace: bool,
+    ) -> Self {
         let mut system = format!("{}{HISTORY_NOTE}", prompt::SYSTEM);
         if llm.examples {
             system.push_str(&examples::text());
@@ -66,17 +72,33 @@ impl History {
                 ..CompactionConfig::trim_only(compact_at, compact_to)
             },
             event_channel_capacity: Some(CHANNEL),
-            notifications: NotificationConfig { compaction: true, tool_payloads: trace, ..NotificationConfig::all() },
+            notifications: NotificationConfig {
+                compaction: true,
+                tool_payloads: trace,
+                ..NotificationConfig::all()
+            },
             telemetry: if trace {
-                TelemetryConfig { model_metadata: true, model_payloads: true, tool_calls: true, tool_payloads: true, messages: false }
+                TelemetryConfig {
+                    model_metadata: true,
+                    model_payloads: true,
+                    tool_calls: true,
+                    tool_payloads: true,
+                    messages: false,
+                }
             } else {
                 TelemetryConfig::none()
             },
             telemetry_channel_capacity: Some(CHANNEL),
             ..Default::default()
         };
-        let (session, events, telemetry) = ChatSession::with_system_prompt_config_and_telemetry(system, config);
-        Self { session, turn: 0, events, telemetry }
+        let (session, events, telemetry) =
+            ChatSession::with_system_prompt_config_and_telemetry(system, config);
+        Self {
+            session,
+            turn: 0,
+            events,
+            telemetry,
+        }
     }
 
     /// What the session reported since the last call: compaction progress always, requests and responses with
@@ -86,11 +108,20 @@ impl History {
         if let Some(events) = &self.events {
             while let Ok(event) = events.try_recv() {
                 match event {
-                    AgentEvent::CompactionBreakdown { total_estimated_tokens, largest_turns, .. } => {
-                        out.push(format!("compaction breakdown: {total_estimated_tokens} tokens"));
+                    AgentEvent::CompactionBreakdown {
+                        total_estimated_tokens,
+                        largest_turns,
+                        ..
+                    } => {
+                        out.push(format!(
+                            "compaction breakdown: {total_estimated_tokens} tokens"
+                        ));
                         for t in largest_turns.iter().take(12) {
                             let preview: String = t.summary.chars().take(70).collect();
-                            out.push(format!("    turn_id={} {:?} {} tokens: {preview}", t.turn_id, t.role, t.estimated_tokens));
+                            out.push(format!(
+                                "    turn_id={} {:?} {} tokens: {preview}",
+                                t.turn_id, t.role, t.estimated_tokens
+                            ));
                         }
                     }
                     AgentEvent::CompactionStarted { .. }
@@ -107,26 +138,41 @@ impl History {
         if let Some(telemetry) = &self.telemetry {
             while let Ok(event) = telemetry.try_recv() {
                 match event {
-                    TelemetryEvent::ModelRequest { message_count, request: Some(request), .. } => {
+                    TelemetryEvent::ModelRequest {
+                        message_count,
+                        request: Some(request),
+                        ..
+                    } => {
                         let tools: Vec<&str> = request.tools.iter().map(|t| t.name()).collect();
-                        out.push(format!("request: {message_count} messages, tools {tools:?}"));
+                        out.push(format!(
+                            "request: {message_count} messages, tools {tools:?}"
+                        ));
                         if tools.iter().all(|t| t.starts_with("compact_"))
                             && let Some(last) = request.messages.last()
                         {
-                            out.push(format!("    last message ({:?}):
-{}", last.role, last.content.text()));
+                            out.push(format!(
+                                "    last message ({:?}):
+{}",
+                                last.role,
+                                last.content.text()
+                            ));
                         }
                     }
-                    TelemetryEvent::ModelResponse { response: Some(response), .. } => {
+                    TelemetryEvent::ModelResponse {
+                        response: Some(response),
+                        ..
+                    } => {
                         let m = &response.message;
                         out.push(format!("response: content {:?}", m.content.text()));
                         for call in &m.tool_calls {
-                            out.push(format!("    call {}({})", call.function.name, call.function.arguments));
+                            out.push(format!(
+                                "    call {}({})",
+                                call.function.name, call.function.arguments
+                            ));
                         }
                     }
-                    TelemetryEvent::ToolCallFinished { .. } | TelemetryEvent::ToolCallFailed { .. } => {
-                        out.push(format!("    {event:?}"))
-                    }
+                    TelemetryEvent::ToolCallFinished { .. }
+                    | TelemetryEvent::ToolCallFailed { .. } => out.push(format!("    {event:?}")),
                     _ => {}
                 }
             }
@@ -150,7 +196,11 @@ impl History {
         let start = Instant::now();
         self.turn += 1;
         let options = shuffled(llm, options);
-        let user = format!("TURN {}\n{}", self.turn, prompt::user_message(llm.order, state, snap, &options));
+        let user = format!(
+            "TURN {}\n{}",
+            self.turn,
+            prompt::user_message(llm.order, state, snap, &options)
+        );
         let prompt_chars = user.len();
         self.session.push_user(user);
 
@@ -158,21 +208,31 @@ impl History {
         // retries.
         let committed: Arc<Mutex<Option<Value>>> = Default::default();
         let mut registry: ToolRegistry = lookup_tools(knowledge, snap);
-        let (record, ids) = (committed.clone(), options.iter().map(|o| o.id.clone()).collect::<Vec<_>>());
+        let (record, ids) = (
+            committed.clone(),
+            options.iter().map(|o| o.id.clone()).collect::<Vec<_>>(),
+        );
         registry.insert(Tool::new(commit_tool(None), move |args: Value| {
             let record = record.clone();
             let ids = ids.clone();
             Box::pin(async move {
                 let id = args["option"].as_str().unwrap_or_default().to_owned();
                 if !ids.contains(&id) {
-                    return Err(smolgent::Error::Tool(format!("{id:?} is not an option; choose one of {}", ids.join(", "))));
+                    return Err(smolgent::Error::Tool(format!(
+                        "{id:?} is not an option; choose one of {}",
+                        ids.join(", ")
+                    )));
                 }
                 *record.lock().unwrap() = Some(args);
                 Ok(Value::String("committed".into()))
             })
         }));
 
-        let result = tokio::time::timeout(LLM_TIMEOUT, self.session.run_with_tools(&llm.free, &registry)).await;
+        let result = tokio::time::timeout(
+            LLM_TIMEOUT,
+            self.session.run_with_tools(&llm.free, &registry),
+        )
+        .await;
         let args = committed.lock().unwrap().take();
         match (args, result) {
             (Some(args), _) => finish(args, &options, Vec::new(), prompt_chars, start),

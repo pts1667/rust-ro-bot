@@ -176,11 +176,25 @@ pub async fn run(llm: &Llm, knowledge: &Knowledge, orders: &[Order], n: usize) -
         let (mut good_total, mut runs, mut bad_patches, mut millis) = (0, 0, 0, 0u128);
         println!("== {order:?} ==");
         for s in SCENARIOS {
-            let options: Vec<Opt> = s.options.iter().map(|(id, line)| Opt { id: (*id).into(), goal: goal_of(id), line: (*line).into(), score: 0.0 }).collect();
+            let options: Vec<Opt> = s
+                .options
+                .iter()
+                .map(|(id, line)| Opt {
+                    id: (*id).into(),
+                    goal: goal_of(id),
+                    line: (*line).into(),
+                    score: 0.0,
+                })
+                .collect();
             let mut picks = Vec::new();
             for _ in 0..n {
                 let options = super::shuffled(&llm, &options);
-                let user = render_turn(*order, s.state, s.observation, &super::prompt::options_text(&options));
+                let user = render_turn(
+                    *order,
+                    s.state,
+                    s.observation,
+                    &super::prompt::options_text(&options),
+                );
                 let start = Instant::now();
                 let pick = match llm_turn(&llm, knowledge, &snap, &options, user).await {
                     Ok(d) => {
@@ -202,7 +216,10 @@ pub async fn run(llm: &Llm, knowledge: &Knowledge, orders: &[Order], n: usize) -
                 }
                 picks.push(pick);
             }
-            let good = picks.iter().filter(|p| s.good.contains(&p.as_str())).count();
+            let good = picks
+                .iter()
+                .filter(|p| s.good.contains(&p.as_str()))
+                .count();
             println!("{good}/{n}  {}  picks: {}", s.name, picks.join(", "));
         }
         println!(

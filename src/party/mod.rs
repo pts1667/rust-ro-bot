@@ -70,9 +70,15 @@ impl Role {
     /// The role a job plays, for a bot that did not choose one.
     pub fn of_job(job: &str) -> Role {
         let job = job.to_lowercase();
-        if ["acolyte", "priest", "monk"].iter().any(|j| job.starts_with(&j[..4])) {
+        if ["acolyte", "priest", "monk"]
+            .iter()
+            .any(|j| job.starts_with(&j[..4]))
+        {
             Role::Healer
-        } else if ["swordman", "knight", "crusader"].iter().any(|j| job.starts_with(&j[..4])) {
+        } else if ["swordman", "knight", "crusader"]
+            .iter()
+            .any(|j| job.starts_with(&j[..4]))
+        {
             Role::Tank
         } else {
             Role::Fighter
@@ -168,7 +174,11 @@ impl PartyPlay {
 
     /// The bot's part in the party: the configured one, or the one of its job.
     pub fn role(&self, job: &str) -> Role {
-        if self.config.auto { Role::of_job(job) } else { self.config.role }
+        if self.config.auto {
+            Role::of_job(job)
+        } else {
+            self.config.role
+        }
     }
 
     /// Takes in the party chat said since the last call.
@@ -176,8 +186,14 @@ impl PartyPlay {
         let me = obs.me.name.clone();
         let leader = obs.party.as_ref().and_then(|p| p.leader.clone());
         let last_seq = self.last_seq;
-        for message in obs.messages.iter().filter(|m| m.seq > last_seq && m.channel == "party") {
-            let Some(line) = chat::parse(&message.text) else { continue };
+        for message in obs
+            .messages
+            .iter()
+            .filter(|m| m.seq > last_seq && m.channel == "party")
+        {
+            let Some(line) = chat::parse(&message.text) else {
+                continue;
+            };
             if line.from.eq_ignore_ascii_case(&me) {
                 continue;
             }
@@ -185,7 +201,10 @@ impl PartyPlay {
             let now = Instant::now();
             match line.said {
                 Said::Hunting(map) => {
-                    if leader.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&line.from)) {
+                    if leader
+                        .as_deref()
+                        .is_some_and(|l| l.eq_ignore_ascii_case(&line.from))
+                    {
                         self.hunt_map = Some(map);
                     }
                 }
@@ -217,8 +236,10 @@ impl PartyPlay {
         }
         self.last_seq = self.last_seq.max(obs.last_message_seq());
         self.away.retain(|_, at| at.elapsed() < AWAY_LASTS);
-        self.heal_requests.retain(|_, at| at.elapsed() < HEAL_REQUEST_LASTS);
-        self.potion_requests.retain(|_, at| at.elapsed() < POTION_REQUEST_LASTS);
+        self.heal_requests
+            .retain(|_, at| at.elapsed() < HEAL_REQUEST_LASTS);
+        self.potion_requests
+            .retain(|_, at| at.elapsed() < POTION_REQUEST_LASTS);
     }
 
     /// Follows `name` rather than the leader, as when it said "follow me".
@@ -228,16 +249,22 @@ impl PartyPlay {
     }
 
     pub fn wants_heal(&self, name: &str) -> bool {
-        self.heal_requests.keys().any(|n| n.eq_ignore_ascii_case(name))
+        self.heal_requests
+            .keys()
+            .any(|n| n.eq_ignore_ascii_case(name))
     }
 
     /// Who asked for potions, and how long ago.
     pub fn potion_requests(&self) -> Vec<(String, Duration)> {
-        self.potion_requests.iter().map(|(name, at)| (name.clone(), at.elapsed())).collect()
+        self.potion_requests
+            .iter()
+            .map(|(name, at)| (name.clone(), at.elapsed()))
+            .collect()
     }
 
     pub fn potions_given(&mut self, to: &str) {
-        self.potion_requests.retain(|n, _| !n.eq_ignore_ascii_case(to));
+        self.potion_requests
+            .retain(|n, _| !n.eq_ignore_ascii_case(to));
     }
 
     fn is_away(&self, name: &str) -> bool {
@@ -253,10 +280,12 @@ impl PartyPlay {
         }
         let me = &obs.me.name;
         let wanted = self.follow.as_deref().or(party.leader.as_deref())?;
-        party
-            .members
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(wanted) && !m.name.eq_ignore_ascii_case(me) && m.online && !self.is_away(&m.name))
+        party.members.iter().find(|m| {
+            m.name.eq_ignore_ascii_case(wanted)
+                && !m.name.eq_ignore_ascii_case(me)
+                && m.online
+                && !self.is_away(&m.name)
+        })
     }
 
     fn may_speak(&self) -> bool {
@@ -266,9 +295,20 @@ impl PartyPlay {
 
 /// The character ids of the party members on the bot's map, the bot included.
 pub fn member_ids(obs: &Observation) -> Vec<u64> {
-    let mut ids: Vec<u64> = obs.players.iter().filter(|p| p.party).map(|p| p.id).collect();
+    let mut ids: Vec<u64> = obs
+        .players
+        .iter()
+        .filter(|p| p.party)
+        .map(|p| p.id)
+        .collect();
     if let Some(party) = &obs.party {
-        ids.extend(party.members.iter().filter(|m| m.map == obs.map.name).filter_map(|m| m.char_id));
+        ids.extend(
+            party
+                .members
+                .iter()
+                .filter(|m| m.map == obs.map.name)
+                .filter_map(|m| m.char_id),
+        );
     }
     ids.push(obs.me.char_id);
     ids.sort_unstable();
@@ -277,16 +317,32 @@ pub fn member_ids(obs: &Observation) -> Vec<u64> {
 }
 
 /// Someone outside the party fights this monster: it is theirs (it attacks them, or they hit it).
-pub fn taken_by_others(obs: &Observation, mob_id: u64, mob_target: Option<u64>, members: &[u64]) -> bool {
+pub fn taken_by_others(
+    obs: &Observation,
+    mob_id: u64,
+    mob_target: Option<u64>,
+    members: &[u64],
+) -> bool {
     mob_target.is_some_and(|t| !members.contains(&t))
-        || obs.players.iter().any(|p| !p.party && !members.contains(&p.id) && p.attack_target == Some(mob_id))
+        || obs
+            .players
+            .iter()
+            .any(|p| !p.party && !members.contains(&p.id) && p.attack_target == Some(mob_id))
 }
 
 /// The monster that attacks a party member, nearest to the bot first: the first thing to fight in a party.
-pub fn attacking_a_member(obs: &Observation, members: &[u64], radius: u32) -> Option<(u64, String)> {
+pub fn attacking_a_member(
+    obs: &Observation,
+    members: &[u64],
+    radius: u32,
+) -> Option<(u64, String)> {
     obs.mobs
         .iter()
-        .filter(|m| m.hp > 0 && m.target.is_some_and(|t| members.contains(&t)) && dist((m.x, m.y), obs.pos()) <= radius)
+        .filter(|m| {
+            m.hp > 0
+                && m.target.is_some_and(|t| members.contains(&t))
+                && dist((m.x, m.y), obs.pos()) <= radius
+        })
         .min_by_key(|m| dist((m.x, m.y), obs.pos()))
         .map(|m| (m.id, m.name.clone()))
 }
@@ -313,7 +369,9 @@ pub(crate) fn same_job(a: &str, b: &str) -> bool {
 impl Bot {
     /// Says something on the party channel, at most every `CHAT_GAP`. Returns whether it was said.
     pub async fn say_to_party(&mut self, said: Said) -> bool {
-        let Some(play) = self.party.as_mut() else { return false };
+        let Some(play) = self.party.as_mut() else {
+            return false;
+        };
         if !play.may_speak() {
             return false;
         }
@@ -334,7 +392,9 @@ impl Bot {
     /// The party's quick reactions, before any goal: invitations, trades, forming the party, telling the others what
     /// they need to know, and the support role. Returns whether it acted, which ends the tick.
     pub async fn party_reflexes(&mut self, obs: &Observation, goal: Option<&Goal>) -> Result<bool> {
-        let Some(play) = self.party.as_mut() else { return Ok(false) };
+        let Some(play) = self.party.as_mut() else {
+            return Ok(false);
+        };
         play.hear(obs);
         let config = play.config.clone();
 
@@ -344,7 +404,13 @@ impl Bot {
                     || (config.auto && play.recruiting.takes(obs, invitation))
                     || play.recruiting.waits_for(&invitation.inviter_name));
             tracing::info!(from = %invitation.inviter_name, accept, "party invitation");
-            self.act(if accept { Action::PartyAccept } else { Action::PartyDecline }).await.ok();
+            self.act(if accept {
+                Action::PartyAccept
+            } else {
+                Action::PartyDecline
+            })
+            .await
+            .ok();
             return Ok(true);
         }
         if self.answer_trade(obs).await? {
@@ -356,13 +422,22 @@ impl Bot {
         if (config.lead || config.auto) && self.form_party(obs).await? {
             return Ok(true);
         }
-        let Some(party) = &obs.party else { return Ok(false) };
+        let Some(party) = &obs.party else {
+            return Ok(false);
+        };
 
         // Tell the others the level (for experience sharing, which needs levels within 15) and where the hunt is.
         let level = (obs.me.base_level, obs.me.job_level);
         let play = self.party.as_ref().expect("checked above");
         if play.announced_level != Some(level) && play.may_speak() {
-            if self.say_to_party(Said::Level { base: level.0, job: level.1, job_name: obs.me.job.clone() }).await {
+            if self
+                .say_to_party(Said::Level {
+                    base: level.0,
+                    job: level.1,
+                    job_name: obs.me.job.clone(),
+                })
+                .await
+            {
                 self.party.as_mut().expect("checked above").announced_level = Some(level);
             }
             return Ok(false);
@@ -370,7 +445,10 @@ impl Bot {
         let leads = leader_of(party).is_some_and(|l| l.name.eq_ignore_ascii_case(&obs.me.name));
         if leads && let Some(Goal::Hunt { map }) = goal {
             let play = self.party.as_ref().expect("checked above");
-            if play.announced_hunt.as_deref() != Some(map) && play.may_speak() && self.say_to_party(Said::Hunting(map.clone())).await {
+            if play.announced_hunt.as_deref() != Some(map)
+                && play.may_speak()
+                && self.say_to_party(Said::Hunting(map.clone())).await
+            {
                 self.party.as_mut().expect("checked above").announced_hunt = Some(map.clone());
             }
         }
@@ -383,12 +461,24 @@ impl Bot {
         let play = self.party.as_mut().expect("party play");
         let Some(party) = &obs.party else {
             // A bot finding its own party creates it while recruiting
-            if play.config.auto || obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE || play.last_create.is_some_and(|at| at.elapsed() < CREATE_EVERY) {
+            if play.config.auto
+                || obs.skill_level("NV_BASIC") < BASIC_SKILL_TO_CREATE
+                || play
+                    .last_create
+                    .is_some_and(|at| at.elapsed() < CREATE_EVERY)
+            {
                 return Ok(false);
             }
             play.last_create = Some(Instant::now());
             let name = play.config.name.clone();
-            match self.act(Action::PartyCreate { name: name.clone(), item_pickup: true, item_share: false }).await {
+            match self
+                .act(Action::PartyCreate {
+                    name: name.clone(),
+                    item_pickup: true,
+                    item_share: false,
+                })
+                .await
+            {
                 Ok(_) => tracing::info!(%name, "creating the party"),
                 Err(error) => tracing::info!(%error, "could not create the party"),
             }
@@ -401,13 +491,25 @@ impl Bot {
             .config
             .friends
             .iter()
-            .filter(|f| !f.eq_ignore_ascii_case(&obs.me.name) && !party.members.iter().any(|m| m.name.eq_ignore_ascii_case(f)))
-            .filter(|f| play.last_invites.get(*f).is_none_or(|at| at.elapsed() >= INVITE_EVERY))
+            .filter(|f| {
+                !f.eq_ignore_ascii_case(&obs.me.name)
+                    && !party.members.iter().any(|m| m.name.eq_ignore_ascii_case(f))
+            })
+            .filter(|f| {
+                play.last_invites
+                    .get(*f)
+                    .is_none_or(|at| at.elapsed() >= INVITE_EVERY)
+            })
             .cloned()
             .collect();
         if let Some(friend) = missing.first() {
             play.last_invites.insert(friend.clone(), Instant::now());
-            match self.act(Action::PartyInvite { name: friend.clone() }).await {
+            match self
+                .act(Action::PartyInvite {
+                    name: friend.clone(),
+                })
+                .await
+            {
                 Ok(_) => tracing::info!(%friend, "invited to the party"),
                 // Not in the game yet: try again later
                 Err(error) => tracing::debug!(%friend, %error, "invitation refused"),
@@ -415,9 +517,18 @@ impl Bot {
             return Ok(true);
         }
         let play = self.party.as_mut().expect("party play");
-        if !party.exp_share && party.members.len() > 1 && play.last_share.is_none_or(|at| at.elapsed() >= SHARE_EVERY) {
+        if !party.exp_share
+            && party.members.len() > 1
+            && play.last_share.is_none_or(|at| at.elapsed() >= SHARE_EVERY)
+        {
             play.last_share = Some(Instant::now());
-            self.act(Action::PartyOptions { exp_share: Some(true), item_pickup: None, item_share: None }).await.ok();
+            self.act(Action::PartyOptions {
+                exp_share: Some(true),
+                item_pickup: None,
+                item_share: None,
+            })
+            .await
+            .ok();
             if party.exp_share_denied {
                 tracing::info!("experience sharing refused: the levels are more than 15 apart");
             }
@@ -430,24 +541,42 @@ impl Bot {
     async fn ask_for_help(&mut self, obs: &Observation) {
         let play = self.party.as_ref().expect("party play");
         let healer_near = obs.players.iter().any(|p| {
-            p.party && matches!(p.job.to_lowercase().as_str(), "acolyte" | "priest" | "monk") && dist((p.x, p.y), obs.pos()) <= SIGHT
+            p.party
+                && matches!(p.job.to_lowercase().as_str(), "acolyte" | "priest" | "monk")
+                && dist((p.x, p.y), obs.pos()) <= SIGHT
         });
-        if healer_near && obs.me.hp_frac() < ASK_HEAL_BELOW && play.asked_heal.is_none_or(|at| at.elapsed() >= ASK_HEAL_EVERY) {
+        if healer_near
+            && obs.me.hp_frac() < ASK_HEAL_BELOW
+            && play
+                .asked_heal
+                .is_none_or(|at| at.elapsed() >= ASK_HEAL_EVERY)
+        {
             if self.say_to_party(Said::NeedHeal).await {
                 self.party.as_mut().expect("party play").asked_heal = Some(Instant::now());
             }
             return;
         }
         let play = self.party.as_ref().expect("party play");
-        if self.knowledge.heal_items(obs) == 0 && play.asked_potions.is_none_or(|at| at.elapsed() >= ASK_POTIONS_EVERY) && self.say_to_party(Said::NeedPotions).await {
+        if self.knowledge.heal_items(obs) == 0
+            && play
+                .asked_potions
+                .is_none_or(|at| at.elapsed() >= ASK_POTIONS_EVERY)
+            && self.say_to_party(Said::NeedPotions).await
+        {
             self.party.as_mut().expect("party play").asked_potions = Some(Instant::now());
         }
     }
 
     /// The party's take on the next step: `None` lets the goal of the strategist run, as for a bot playing alone.
     /// Errands go first; otherwise a member follows the leader and fights by its side.
-    pub async fn party_step(&mut self, obs: &Observation, goal: Option<&Goal>) -> Result<Option<Outcome>> {
-        let Some(play) = self.party.as_ref() else { return Ok(None) };
+    pub async fn party_step(
+        &mut self,
+        obs: &Observation,
+        goal: Option<&Goal>,
+    ) -> Result<Option<Outcome>> {
+        let Some(play) = self.party.as_ref() else {
+            return Ok(None);
+        };
         if obs.party.is_none() {
             return Ok(None);
         }
@@ -469,7 +598,15 @@ impl Bot {
         if let Some(outcome) = self.give_potions_if_asked(obs).await? {
             return Ok(Some(outcome));
         }
-        let Some(followed) = self.party.as_ref().expect("party play").followed(obs).cloned() else { return Ok(None) };
+        let Some(followed) = self
+            .party
+            .as_ref()
+            .expect("party play")
+            .followed(obs)
+            .cloned()
+        else {
+            return Ok(None);
+        };
         self.follow(obs, &followed).await.map(Some)
     }
 
@@ -494,13 +631,22 @@ impl Bot {
         // A member under attack first, then what the leader hits when it is in sight, then what is near it.
         let target = attacking_a_member(obs, &members, SIGHT).or_else(|| {
             let hit = obs.player_near(&followed.name, SIGHT)?.attack_target?;
-            obs.mobs.iter().find(|m| m.id == hit && m.hp > 0).map(|m| (m.id, m.name.clone()))
+            obs.mobs
+                .iter()
+                .find(|m| m.id == hit && m.hp > 0)
+                .map(|m| (m.id, m.name.clone()))
         });
-        let near_warp = |id: u64| obs.mobs.iter().any(|m| m.id == id && obs.near_warp((m.x, m.y), 2));
+        let near_warp = |id: u64| {
+            obs.mobs
+                .iter()
+                .any(|m| m.id == id && obs.near_warp((m.x, m.y), 2))
+        };
         let target = match target {
             Some((id, _)) if near_warp(id) => None,
             Some(found) => Some(found),
-            None if dist(obs.pos(), there) <= FOLLOW_FAR => self.pick_target(obs, Some((there, ASSIST_RADIUS))).await?,
+            None if dist(obs.pos(), there) <= FOLLOW_FAR => {
+                self.pick_target(obs, Some((there, ASSIST_RADIUS))).await?
+            }
             None => None,
         };
         if let Some((id, name)) = target {
@@ -514,7 +660,11 @@ impl Bot {
     }
 
     /// Walks to a cell next to `there` (or onto it).
-    pub(crate) async fn walk_next_to(&mut self, obs: &Observation, there: (u16, u16)) -> Result<Outcome> {
+    pub(crate) async fn walk_next_to(
+        &mut self,
+        obs: &Observation,
+        there: (u16, u16),
+    ) -> Result<Outcome> {
         if obs.near_warp(there, 1) {
             // A member just arrived through a warp, or stands at one: it moves on soon, wait for it here.
             Bot::pause(800).await;
@@ -535,7 +685,9 @@ impl Bot {
 
     /// For the leader: a member in sight with little HP left. The leader waits for it before pulling more.
     pub fn member_in_trouble(&self, obs: &Observation) -> bool {
-        let Some(party) = &obs.party else { return false };
+        let Some(party) = &obs.party else {
+            return false;
+        };
         party.members.iter().any(|m| {
             !m.name.eq_ignore_ascii_case(&obs.me.name)
                 && m.map == obs.map.name
@@ -551,7 +703,13 @@ mod tests {
     use crate::api::{Message, Mob, Player};
 
     fn config() -> PartyConfig {
-        PartyConfig { name: "Wanderers".into(), friends: vec!["Alpha".into(), "Beta".into()], lead: false, role: Role::Fighter, auto: false }
+        PartyConfig {
+            name: "Wanderers".into(),
+            friends: vec!["Alpha".into(), "Beta".into()],
+            lead: false,
+            role: Role::Fighter,
+            auto: false,
+        }
     }
 
     fn member(name: &str, leader: bool, map: &str, pos: Option<(u16, u16)>) -> PartyMember {
@@ -577,14 +735,21 @@ mod tests {
         obs.party = Some(Party {
             name: "Wanderers".into(),
             leader: Some("Alpha".into()),
-            members: vec![member("Alpha", true, "prt_fild08", Some((110, 100))), member("Beta", false, "prt_fild08", Some((100, 100)))],
+            members: vec![
+                member("Alpha", true, "prt_fild08", Some((110, 100))),
+                member("Beta", false, "prt_fild08", Some((100, 100))),
+            ],
             ..Default::default()
         });
         obs
     }
 
     fn party_line(seq: u64, text: &str) -> Message {
-        Message { seq, channel: "party".into(), text: text.into() }
+        Message {
+            seq,
+            channel: "party".into(),
+            text: text.into(),
+        }
     }
 
     #[test]
@@ -598,11 +763,13 @@ mod tests {
         obs.messages.push(party_line(2, "Alpha : follow me"));
         play.hear(&obs);
         assert_eq!(play.followed(&obs).map(|m| m.name.as_str()), Some("Alpha"));
-        obs.messages.push(party_line(3, "Alpha : brb, selling loot"));
+        obs.messages
+            .push(party_line(3, "Alpha : brb, selling loot"));
         play.hear(&obs);
         assert!(play.followed(&obs).is_none(), "the leader is away");
         obs.messages.push(party_line(4, "Alpha : back"));
-        obs.messages.push(party_line(5, "Alpha : hunting at prt_fild07"));
+        obs.messages
+            .push(party_line(5, "Alpha : hunting at prt_fild07"));
         play.hear(&obs);
         assert_eq!(play.followed(&obs).map(|m| m.name.as_str()), Some("Alpha"));
         assert_eq!(play.hunt_map.as_deref(), Some("prt_fild07"));
@@ -614,11 +781,21 @@ mod tests {
         obs.me.name = "Alpha".into();
         let mut play = PartyPlay::new(config(), 5);
         assert!(play.followed(&obs).is_none());
-        obs.messages = vec![party_line(3, "Beta : heal please"), party_line(6, "Beta : out of potions")];
+        obs.messages = vec![
+            party_line(3, "Beta : heal please"),
+            party_line(6, "Beta : out of potions"),
+        ];
         play.hear(&obs);
         assert!(!play.wants_heal("Beta"));
-        assert_eq!(play.potion_requests().into_iter().map(|(name, _)| name).collect::<Vec<_>>(), vec!["Beta".to_string()]);
-        obs.messages.push(party_line(7, "Gamma : sending potions to beta"));
+        assert_eq!(
+            play.potion_requests()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            vec!["Beta".to_string()]
+        );
+        obs.messages
+            .push(party_line(7, "Gamma : sending potions to beta"));
         play.hear(&obs);
         assert!(play.potion_requests().is_empty());
     }
@@ -627,19 +804,59 @@ mod tests {
     fn monsters_of_other_players_are_left_to_them() {
         let mut obs = observation();
         obs.players = vec![
-            Player { id: 1, name: "Alpha".into(), party: true, ..Default::default() },
-            Player { id: 9, name: "Stranger".into(), attack_target: Some(500), ..Default::default() },
+            Player {
+                id: 1,
+                name: "Alpha".into(),
+                party: true,
+                ..Default::default()
+            },
+            Player {
+                id: 9,
+                name: "Stranger".into(),
+                attack_target: Some(500),
+                ..Default::default()
+            },
         ];
         let members = member_ids(&obs);
         assert_eq!(members, vec![1, 2]);
-        assert!(taken_by_others(&obs, 500, None, &members), "a stranger hits it");
-        assert!(taken_by_others(&obs, 501, Some(9), &members), "it attacks a stranger");
-        assert!(!taken_by_others(&obs, 502, Some(1), &members), "it attacks a member");
+        assert!(
+            taken_by_others(&obs, 500, None, &members),
+            "a stranger hits it"
+        );
+        assert!(
+            taken_by_others(&obs, 501, Some(9), &members),
+            "it attacks a stranger"
+        );
+        assert!(
+            !taken_by_others(&obs, 502, Some(1), &members),
+            "it attacks a member"
+        );
         obs.mobs = vec![
-            Mob { id: 502, name: "Poring".into(), x: 104, y: 100, hp: 50, max_hp: 50, target: Some(1), ..Default::default() },
-            Mob { id: 503, name: "Lunatic".into(), x: 101, y: 100, hp: 50, max_hp: 50, target: Some(9), ..Default::default() },
+            Mob {
+                id: 502,
+                name: "Poring".into(),
+                x: 104,
+                y: 100,
+                hp: 50,
+                max_hp: 50,
+                target: Some(1),
+                ..Default::default()
+            },
+            Mob {
+                id: 503,
+                name: "Lunatic".into(),
+                x: 101,
+                y: 100,
+                hp: 50,
+                max_hp: 50,
+                target: Some(9),
+                ..Default::default()
+            },
         ];
-        assert_eq!(attacking_a_member(&obs, &members, SIGHT).map(|(id, _)| id), Some(502));
+        assert_eq!(
+            attacking_a_member(&obs, &members, SIGHT).map(|(id, _)| id),
+            Some(502)
+        );
     }
 
     #[test]

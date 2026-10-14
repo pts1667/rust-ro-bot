@@ -23,7 +23,10 @@ const ROOM_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const TEST_HEAL_AT: f32 = 0.5;
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 type Area = (u16, u16, u16, u16);
@@ -48,7 +51,9 @@ fn shown_name(name: &str) -> &str {
 impl Bot {
     /// Does the next stage of a quest. The bot stands on the stage's map (the plan travelled there).
     pub async fn quest_step(&mut self, id: &str) -> Result<Outcome> {
-        let Some(quest) = quests::find(id) else { return Ok(Outcome::failed(format!("no quest {id}"))) };
+        let Some(quest) = quests::find(id) else {
+            return Ok(Outcome::failed(format!("no quest {id}")));
+        };
         let obs = self.observe().await?;
         let mut progress = self.memory.quests.get(id).cloned().unwrap_or_default();
         if quest.finished(&obs) {
@@ -59,7 +64,10 @@ impl Bot {
         let i = quest.actionable_stage(&progress, &obs);
         let Some(stage) = quest.stages.get(i) else {
             // Every stage went through and the reward did not come: start over, the NPCs will say where it stands.
-            self.memory.note(format!("{}: all stages done but no reward yet, starting over", quest.title));
+            self.memory.note(format!(
+                "{}: all stages done but no reward yet, starting over",
+                quest.title
+            ));
             progress.stage = 0;
             self.memory.quests.insert(id.to_owned(), progress);
             return Ok(Outcome::failed("quest went through without its reward"));
@@ -71,13 +79,27 @@ impl Bot {
         if let Some(item) = stage.wear {
             self.wear(&obs, item).await;
         }
-        tracing::info!(quest = quest.title, stage = i, what = stage.what, "quest stage");
+        tracing::info!(
+            quest = quest.title,
+            stage = i,
+            what = stage.what,
+            "quest stage"
+        );
         self.last_dialog.clear();
         let outcome = match &stage.act {
             Act::Talk(talk) => self.quest_talk(talk, stage.what).await?,
             Act::Fight(fight) => self.quest_fight(fight, stage.area).await?,
             Act::Endure { map } => self.quest_endure(map).await?,
-            Act::Walk { map, x, y, menu, answers } => self.quest_walk(map, (*x, *y), stage.area, menu, answers, stage.what).await?,
+            Act::Walk {
+                map,
+                x,
+                y,
+                menu,
+                answers,
+            } => {
+                self.quest_walk(map, (*x, *y), stage.area, menu, answers, stage.what)
+                    .await?
+            }
             Act::Room { map, npc } => self.quest_room(map, npc).await?,
             Act::Dance(dance) => self.quest_dance(dance).await?,
             Act::Gather(_) => Outcome::failed("items still missing"),
@@ -87,10 +109,19 @@ impl Bot {
         if let Act::Talk(talk) = &stage.act
             && !talk.assigns.is_empty()
         {
-            let names = self.item_names(talk.assigns.iter().flat_map(|s| s.iter().map(|(i, _)| *i))).await;
+            let names = self
+                .item_names(talk.assigns.iter().flat_map(|s| s.iter().map(|(i, _)| *i)))
+                .await;
             if let Some(set) = assigned_set(talk.assigns, &said, |i| names.get(&i).cloned()) {
-                let list: Vec<String> = set.iter().map(|(i, n)| format!("{n} {}", names.get(i).cloned().unwrap_or_default())).collect();
-                self.memory.note(format!("{}: asked to bring {}", quest.title, list.join(", ")));
+                let list: Vec<String> = set
+                    .iter()
+                    .map(|(i, n)| format!("{n} {}", names.get(i).cloned().unwrap_or_default()))
+                    .collect();
+                self.memory.note(format!(
+                    "{}: asked to bring {}",
+                    quest.title,
+                    list.join(", ")
+                ));
                 progress.assigned = set;
             }
         }
@@ -98,25 +129,43 @@ impl Bot {
             (_, true) => outcome == Outcome::Done,
             (Act::Talk(_), false) => stage.done.iter().any(|c| c.holds(&after, &said)),
             // A test is passed by coming out of it alive, not by dying or running out of time.
-            (_, false) => outcome == Outcome::Done && stage.done.iter().any(|c| c.holds(&after, &said)),
+            (_, false) => {
+                outcome == Outcome::Done && stage.done.iter().any(|c| c.holds(&after, &said))
+            }
         };
-        let back = stage.back.iter().find(|(text, _)| quests::Check::Said(text).holds(&after, &said)).map(|(_, to)| *to);
+        let back = stage
+            .back
+            .iter()
+            .find(|(text, _)| quests::Check::Said(text).holds(&after, &said))
+            .map(|(_, to)| *to);
         if let Some(to) = back {
-            self.memory.note(format!("{}: '{}' sends the quest back to '{}'", quest.title, stage.what, quest.stages[to].what));
+            self.memory.note(format!(
+                "{}: '{}' sends the quest back to '{}'",
+                quest.title, stage.what, quest.stages[to].what
+            ));
             progress.stage = to;
             progress.attempts = 0;
         } else if done {
-            self.memory.note(format!("{}: {} - done", quest.title, stage.what));
+            self.memory
+                .note(format!("{}: {} - done", quest.title, stage.what));
             progress.stage = i + 1;
             progress.attempts = 0;
         } else {
             progress.attempts += 1;
-            let last = said.iter().rev().find(|l| !l.starts_with('[')).cloned().unwrap_or_default();
+            let last = said
+                .iter()
+                .rev()
+                .find(|l| !l.starts_with('['))
+                .cloned()
+                .unwrap_or_default();
             tracing::info!(quest = quest.title, stage = stage.what, attempts = progress.attempts, %last, ?outcome, "quest stage not done");
             if progress.attempts >= MAX_ATTEMPTS {
                 progress.attempts = 0;
                 progress.paused_until = now_secs() + PAUSE_SECS;
-                self.memory.note(format!("{}: stuck at '{}' (last said: {last}), leaving it for a while", quest.title, stage.what));
+                self.memory.note(format!(
+                    "{}: stuck at '{}' (last said: {last}), leaving it for a while",
+                    quest.title, stage.what
+                ));
             }
         }
         if quest.finished(&after) {
@@ -146,8 +195,16 @@ impl Bot {
 
     /// Puts on an item the stage asks to wear, when the bot has it and does not wear it.
     async fn wear(&mut self, obs: &Observation, item: u32) {
-        if let Some(it) = obs.inventory.iter().find(|i| i.item_id == item && !i.equipped) {
-            if obs.inventory.iter().any(|i| i.item_id == item && i.equipped) {
+        if let Some(it) = obs
+            .inventory
+            .iter()
+            .find(|i| i.item_id == item && !i.equipped)
+        {
+            if obs
+                .inventory
+                .iter()
+                .any(|i| i.item_id == item && i.equipped)
+            {
                 return;
             }
             let index = it.index;
@@ -162,9 +219,16 @@ impl Bot {
         let wanted = talk.npc.to_lowercase();
         obs.npcs
             .iter()
-            .filter(|n| shown_name(&n.name).to_lowercase() == wanted || n.name.to_lowercase() == wanted)
+            .filter(|n| {
+                shown_name(&n.name).to_lowercase() == wanted || n.name.to_lowercase() == wanted
+            })
             .min_by_key(|n| dist((n.x, n.y), (talk.x, talk.y)))
-            .or_else(|| obs.npcs.iter().filter(|n| dist((n.x, n.y), (talk.x, talk.y)) <= 1).min_by_key(|n| dist((n.x, n.y), (talk.x, talk.y))))
+            .or_else(|| {
+                obs.npcs
+                    .iter()
+                    .filter(|n| dist((n.x, n.y), (talk.x, talk.y)) <= 1)
+                    .min_by_key(|n| dist((n.x, n.y), (talk.x, talk.y)))
+            })
             .map(|n| (n.id, n.region))
     }
 
@@ -182,13 +246,20 @@ impl Bot {
             && !self.reach_region(to).await?
             && self.travel_into(talk.map, to).await? != Outcome::Done
         {
-            return Ok(Outcome::failed(format!("cannot reach the room of {} on {}", talk.npc, talk.map)));
+            return Ok(Outcome::failed(format!(
+                "cannot reach the room of {} on {}",
+                talk.npc, talk.map
+            )));
         }
         let intent = Intent {
             goal: format!("{what}. Say yes to the quest and to its tests."),
             keywords: talk.menu.iter().map(|s| (*s).to_owned()).collect(),
             text_answer: None,
-            answers: talk.answers.iter().map(|(q, a)| ((*q).to_owned(), (*a).to_owned())).collect(),
+            answers: talk
+                .answers
+                .iter()
+                .map(|(q, a)| ((*q).to_owned(), (*a).to_owned()))
+                .collect(),
             recite: talk.recite,
         };
         let mut said = Vec::new();
@@ -199,7 +270,12 @@ impl Bot {
                     tracing::debug!(%error, "talking again refused");
                     break;
                 }
-                Err(error) => return Ok(Outcome::failed(format!("cannot talk to {}: {error}", talk.npc))),
+                Err(error) => {
+                    return Ok(Outcome::failed(format!(
+                        "cannot talk to {}: {error}",
+                        talk.npc
+                    )));
+                }
             };
             let end = self.run_dialog(dialog_of(&result), &intent).await?;
             tracing::debug!(?end, "quest dialogue ended");
@@ -232,7 +308,8 @@ impl Bot {
         while start.elapsed() < TEST_TIMEOUT {
             let obs = self.observe().await?;
             if obs.me.dead {
-                self.memory.note(format!("died in the test on {}", fight.map));
+                self.memory
+                    .note(format!("died in the test on {}", fight.map));
                 return Ok(Outcome::failed("died in the test"));
             }
             if obs.map.name != fight.map {
@@ -257,7 +334,11 @@ impl Bot {
                 .mobs
                 .iter()
                 .filter(|m| within(area, (m.x, m.y)))
-                .filter(|m| fight.only.is_none_or(|only| m.name.eq_ignore_ascii_case(only)))
+                .filter(|m| {
+                    fight
+                        .only
+                        .is_none_or(|only| m.name.eq_ignore_ascii_case(only))
+                })
                 .filter(|m| !fight.spare.iter().any(|s| m.name.eq_ignore_ascii_case(s)))
                 .filter(|m| !self.is_blacklisted(m.id))
                 // What attacks the bot first, then the nearest.
@@ -280,8 +361,22 @@ impl Bot {
                             return Ok(Outcome::Done);
                         }
                         let step = leg(me, to);
-                        if self.act(Action::Move { x: step.0, y: step.1, wait: true }).await.is_err() {
-                            self.act(Action::Move { x: to.0, y: to.1, wait: true }).await.ok();
+                        if self
+                            .act(Action::Move {
+                                x: step.0,
+                                y: step.1,
+                                wait: true,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            self.act(Action::Move {
+                                x: to.0,
+                                y: to.1,
+                                wait: true,
+                            })
+                            .await
+                            .ok();
                         }
                         continue;
                     } else if idle % 10 == 0 {
@@ -292,15 +387,27 @@ impl Bot {
                 }
             }
         }
-        Ok(Outcome::failed(format!("the test on {} did not end", fight.map)))
+        Ok(Outcome::failed(format!(
+            "the test on {} did not end",
+            fight.map
+        )))
     }
 
     /// A step towards the far side of the map, to find what the test spawned there.
     async fn search_walk(&mut self, obs: &Observation) {
         let (w, h) = (obs.map.width.max(2) as u16, obs.map.height.max(2) as u16);
         let (x, y) = obs.pos();
-        let to = (if x < w / 2 { x + (w - x) / 2 } else { x / 2 }, if y < h / 2 { y + (h - y) / 2 } else { y / 2 });
-        self.act(Action::Move { x: to.0, y: to.1, wait: true }).await.ok();
+        let to = (
+            if x < w / 2 { x + (w - x) / 2 } else { x / 2 },
+            if y < h / 2 { y + (h - y) / 2 } else { y / 2 },
+        );
+        self.act(Action::Move {
+            x: to.0,
+            y: to.1,
+            wait: true,
+        })
+        .await
+        .ok();
     }
 
     /// Stands on a test map without attacking until the script sends the bot away.
@@ -345,7 +452,10 @@ impl Bot {
                 let intent = Intent {
                     goal: format!("{what}. Refuse temptations."),
                     keywords: menu.iter().map(|s| (*s).to_owned()).collect(),
-                    answers: answers.iter().map(|(q, a)| ((*q).to_owned(), (*a).to_owned())).collect(),
+                    answers: answers
+                        .iter()
+                        .map(|(q, a)| ((*q).to_owned(), (*a).to_owned()))
+                        .collect(),
                     ..Default::default()
                 };
                 self.run_dialog(obs.dialog.clone(), &intent).await?;
@@ -355,7 +465,10 @@ impl Bot {
                 // What stands there may speak up, send the bot on, or send it back to walk the way again (a maze guard).
                 Bot::pause(1500).await;
                 let after = self.observe().await?;
-                let sent_back = area.is_some() && after.map.name == map && within(area, after.pos()) && dist(after.pos(), to) > 1;
+                let sent_back = area.is_some()
+                    && after.map.name == map
+                    && within(area, after.pos())
+                    && dist(after.pos(), to) > 1;
                 if after.dialog.is_some() || sent_back {
                     continue;
                 }
@@ -366,13 +479,32 @@ impl Bot {
             }
             // A straight short leg, or the whole way when a wall stands in the straight line (a maze).
             let step = leg(obs.pos(), to);
-            if self.act(Action::Move { x: step.0, y: step.1, wait: true }).await.is_err()
-                && let Err(error) = self.act(Action::Move { x: to.0, y: to.1, wait: true }).await
+            if self
+                .act(Action::Move {
+                    x: step.0,
+                    y: step.1,
+                    wait: true,
+                })
+                .await
+                .is_err()
+                && let Err(error) = self
+                    .act(Action::Move {
+                        x: to.0,
+                        y: to.1,
+                        wait: true,
+                    })
+                    .await
             {
-                return Ok(Outcome::failed(format!("cannot walk to ({}, {}) on {map}: {error}", to.0, to.1)));
+                return Ok(Outcome::failed(format!(
+                    "cannot walk to ({}, {}) on {map}: {error}",
+                    to.0, to.1
+                )));
             }
         }
-        Ok(Outcome::failed(format!("did not reach ({}, {}) on {map}", to.0, to.1)))
+        Ok(Outcome::failed(format!(
+            "did not reach ({}, {}) on {map}",
+            to.0, to.1
+        )))
     }
 
     /// Joins the waiting room of an NPC and waits for the script to send the bot on.
@@ -383,23 +515,40 @@ impl Bot {
             .npcs
             .iter()
             .filter(|n| n.waiting_room.is_some())
-            .find(|n| shown_name(&n.name).to_lowercase() == wanted || n.name.to_lowercase().contains(&wanted))
+            .find(|n| {
+                shown_name(&n.name).to_lowercase() == wanted
+                    || n.name.to_lowercase().contains(&wanted)
+            })
             .or_else(|| obs.npcs.iter().find(|n| n.waiting_room.is_some()))
             .map(|n| (n.id, n.x, n.y))
         else {
-            return Ok(Outcome::failed(format!("no waiting room of {npc} on {map}")));
+            return Ok(Outcome::failed(format!(
+                "no waiting room of {npc} on {map}"
+            )));
         };
         if obs.dialog.is_some() {
             // A guide by the room talks to whoever walks past.
-            let intent = Intent { goal: format!("wait for the test of {npc}"), keywords: vec!["keep trying".into(), "continue".into(), "yes".into()], ..Default::default() };
+            let intent = Intent {
+                goal: format!("wait for the test of {npc}"),
+                keywords: vec!["keep trying".into(), "continue".into(), "yes".into()],
+                ..Default::default()
+            };
             self.run_dialog(obs.dialog.clone(), &intent).await?;
         }
         if obs.chat_room.is_none() {
             if dist(obs.pos(), (host.1, host.2)) > 8 {
-                self.act(Action::Move { x: host.1, y: host.2.saturating_sub(2), wait: true }).await.ok();
+                self.act(Action::Move {
+                    x: host.1,
+                    y: host.2.saturating_sub(2),
+                    wait: true,
+                })
+                .await
+                .ok();
             }
             if let Err(error) = self.act(Action::RoomJoinNpc { npc: host.0 }).await {
-                return Ok(Outcome::failed(format!("cannot join the waiting room of {npc}: {error}")));
+                return Ok(Outcome::failed(format!(
+                    "cannot join the waiting room of {npc}: {error}"
+                )));
             }
             tracing::info!(%npc, "waiting in the room");
         }
@@ -423,7 +572,9 @@ impl Bot {
             }
         }
         self.act(Action::RoomLeave).await.ok();
-        Ok(Outcome::failed(format!("waited too long in the room of {npc}")))
+        Ok(Outcome::failed(format!(
+            "waited too long in the room of {npc}"
+        )))
     }
 }
 
@@ -433,11 +584,21 @@ impl Bot {
         let obs = self.observe().await?;
         // The calls from the start of this test on; none of an earlier one.
         let calls = |o: &Observation| -> Vec<(u64, String)> {
-            let mut v: Vec<(u64, String)> = o.messages.iter().filter(|m| m.channel == "announce").map(|m| (m.seq, m.text.to_lowercase())).collect();
+            let mut v: Vec<(u64, String)> = o
+                .messages
+                .iter()
+                .filter(|m| m.channel == "announce")
+                .map(|m| (m.seq, m.text.to_lowercase()))
+                .collect();
             v.sort_by_key(|(seq, _)| *seq);
             v
         };
-        let mut heard = calls(&obs).iter().rev().find(|(_, t)| t.contains(dance.start)).map(|(seq, _)| *seq).unwrap_or_else(|| obs.last_message_seq());
+        let mut heard = calls(&obs)
+            .iter()
+            .rev()
+            .find(|(_, t)| t.contains(dance.start))
+            .map(|(seq, _)| *seq)
+            .unwrap_or_else(|| obs.last_message_seq());
         let mut finished = false;
         let mut poked = Instant::now();
         let start = Instant::now();
@@ -449,20 +610,41 @@ impl Bot {
             if obs.me.dead {
                 return Ok(Outcome::failed("died on the dance floor"));
             }
-            let new: Vec<(u64, String)> = calls(&obs).into_iter().filter(|(seq, _)| *seq > heard).collect();
+            let new: Vec<(u64, String)> = calls(&obs)
+                .into_iter()
+                .filter(|(seq, _)| *seq > heard)
+                .collect();
             for (seq, text) in new {
                 heard = seq;
                 finished |= text.contains(dance.finish);
                 if let Some(to) = called_cell(&text, dance.cells) {
                     tracing::info!(call = %text.trim(), ?to, "dance step");
-                    self.act(Action::Move { x: to.0, y: to.1, wait: true }).await.ok();
+                    self.act(Action::Move {
+                        x: to.0,
+                        y: to.1,
+                        wait: true,
+                    })
+                    .await
+                    .ok();
                 }
             }
             if finished && poked.elapsed() > Duration::from_secs(3) {
                 // The way off opens on the end cell a little after the last call: step off it and back on.
                 poked = Instant::now();
-                self.act(Action::Move { x: dance.end.0 + 4, y: dance.end.1, wait: true }).await.ok();
-                self.act(Action::Move { x: dance.end.0, y: dance.end.1, wait: true }).await.ok();
+                self.act(Action::Move {
+                    x: dance.end.0 + 4,
+                    y: dance.end.1,
+                    wait: true,
+                })
+                .await
+                .ok();
+                self.act(Action::Move {
+                    x: dance.end.0,
+                    y: dance.end.1,
+                    wait: true,
+                })
+                .await
+                .ok();
             }
             Bot::pause(150).await;
         }
@@ -473,7 +655,11 @@ impl Bot {
 /// The cell of the move a dance call names last ("Left, then Right~!" ends on the right).
 fn called_cell(call: &str, cells: &[(&str, (u16, u16))]) -> Option<(u16, u16)> {
     let call = call.to_lowercase();
-    cells.iter().filter_map(|(word, cell)| call.rfind(word).map(|at| (at, *cell))).max_by_key(|(at, _)| *at).map(|(_, cell)| cell)
+    cells
+        .iter()
+        .filter_map(|(word, cell)| call.rfind(word).map(|at| (at, *cell)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, cell)| cell)
 }
 
 /// The map of the stage a quest is at, and the spot (an NPC) there.
@@ -500,11 +686,23 @@ mod tests {
 
     #[test]
     fn a_dance_call_ends_on_the_move_it_names_last() {
-        const CELLS: &[(&str, (u16, u16))] = &[("up", (69, 113)), ("down", (69, 107)), ("left", (66, 110)), ("right", (72, 110)), ("center", (69, 110))];
+        const CELLS: &[(&str, (u16, u16))] = &[
+            ("up", (69, 113)),
+            ("down", (69, 107)),
+            ("left", (66, 110)),
+            ("right", (72, 110)),
+            ("center", (69, 110)),
+        ];
         assert_eq!(called_cell(" Up!", CELLS), Some((69, 113)));
         assert_eq!(called_cell(" Left, then Right~!", CELLS), Some((72, 110)));
-        assert_eq!(called_cell(" Left, Center, Down, Up~! ", CELLS), Some((69, 113)));
-        assert_eq!(called_cell(" Back to the Center~ !", CELLS), Some((69, 110)));
+        assert_eq!(
+            called_cell(" Left, Center, Down, Up~! ", CELLS),
+            Some((69, 113))
+        );
+        assert_eq!(
+            called_cell(" Back to the Center~ !", CELLS),
+            Some((69, 110))
+        );
         assert_eq!(called_cell(" Hold in place... ", CELLS), None);
     }
 }

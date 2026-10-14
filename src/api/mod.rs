@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod client;
+pub mod forum;
 pub mod observation;
 
 pub use action::{Action, BuyLine, SellLine};

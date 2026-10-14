@@ -23,23 +23,53 @@ pub struct Cli {
 #[derive(Args, Clone)]
 pub struct Endpoints {
     /// Base URL of the bot API.
-    #[arg(long, env = "BOT_API_URL", default_value = "http://127.0.0.1:6902", global = true)]
+    #[arg(
+        long,
+        env = "BOT_API_URL",
+        default_value = "http://127.0.0.1:6902",
+        global = true
+    )]
     pub url: String,
 
     /// Base URL of the reference (`/db` and `/wiki`).
-    #[arg(long, env = "BOT_DB_URL", default_value = "http://127.0.0.1:6904", global = true)]
+    #[arg(
+        long,
+        env = "BOT_DB_URL",
+        default_value = "http://127.0.0.1:6904",
+        global = true
+    )]
     pub db_url: String,
 
     /// Base URL of the llama.cpp server.
-    #[arg(long, env = "BOT_LLM_URL", default_value = "http://127.0.0.1:8080", global = true)]
+    #[arg(
+        long,
+        env = "BOT_LLM_URL",
+        default_value = "http://127.0.0.1:8080",
+        global = true
+    )]
     pub llm_url: String,
 
+    /// Base URL of the llama.cpp server of the decision model (`/v1/systemone`), for `--voice system-one`.
+    #[arg(
+        long,
+        env = "BOT_S1_URL",
+        default_value = "http://127.0.0.1:9931",
+        global = true
+    )]
+    pub s1_url: String,
+
     /// Model name sent to the llama.cpp server (it serves one model and ignores the name).
-    #[arg(long, env = "BOT_LLM_MODEL", default_value = "local-model", global = true)]
+    #[arg(
+        long,
+        env = "BOT_LLM_MODEL",
+        default_value = "local-model",
+        global = true
+    )]
     pub llm_model: String,
 
-    /// Tokens the model may think before a strategist answer (llama.cpp `thinking_budget_tokens`). 0 turns thinking off.
-    #[arg(long, env = "BOT_LLM_THINK", default_value_t = 0, global = true)]
+    /// Tokens the model may think before a strategist answer or a forum turn (llama.cpp `thinking_budget_tokens`). 0
+    /// turns thinking off.
+    #[arg(long, env = "BOT_LLM_THINK", default_value_t = DEFAULT_THINK, global = true)]
     pub llm_think: u32,
 
     #[command(flatten)]
@@ -114,13 +144,21 @@ pub struct RunArgs {
     /// Stop after this many minutes.
     #[arg(long)]
     pub minutes: Option<u64>,
-    /// Do not use the LLM: the fallback strategist picks the goals.
+    /// Use no model at all: the fallback strategist picks the goals, and the bot does not chat or visit the forum.
     #[arg(long)]
     pub no_llm: bool,
     /// Seconds between two strategist steps when nothing happens.
     #[arg(long, default_value_t = 45)]
     pub strategist_period: u64,
-    /// Chance (0 to 1) that a strategist step goes to the LLM; the others use the deterministic fallback.
+    /// Who talks in chat and on the forum and takes the model's share of the goal choices: the LLM in its own words,
+    /// or the decision model with sentences of a catalogue.
+    #[arg(long, value_enum, default_value_t = crate::voice::VoiceMode::Llm)]
+    pub voice: crate::voice::VoiceMode,
+    /// Never visit the players' forum (only a bot with a voice visits it).
+    #[arg(long)]
+    pub no_forum: bool,
+    /// Chance (0 to 1) that a strategist step goes to the model (the LLM, or the decision model with
+    /// `--voice system-one`); the others use the deterministic fallback.
     #[arg(long, default_value_t = 1.0)]
     pub llm_share: f32,
     /// Layout of the strategist turns.
@@ -154,9 +192,8 @@ impl Endpoints {
     /// which the server would not strip, so it goes here.
     pub fn load_key(&self) -> Result<String> {
         let raw = match (&self.key_file, &self.key) {
-            (Some(path), _) => {
-                std::fs::read_to_string(path).with_context(|| format!("reading key file {}", path.display()))?
-            }
+            (Some(path), _) => std::fs::read_to_string(path)
+                .with_context(|| format!("reading key file {}", path.display()))?,
             (None, Some(key)) => key.clone(),
             (None, None) => bail!("no API key: pass --key-file <path> or set BOT_API_KEY_FILE"),
         };
@@ -175,6 +212,9 @@ impl Endpoints {
         self.data_dir.join("state")
     }
 }
+
+/// Default thinking budget of the strategist and the forum, in tokens.
+pub const DEFAULT_THINK: u32 = 2048;
 
 /// llama.cpp sampling parameters of the strategist. Unset ones keep the server's defaults.
 #[derive(Args, Clone, Debug)]

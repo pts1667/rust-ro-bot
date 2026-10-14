@@ -118,7 +118,12 @@ pub fn text() -> String {
         "\n\nWORKED EXAMPLES (made-up characters, situations shortened; they show how to reason, not what to choose):\n",
     );
     for (i, e) in EXAMPLES.iter().enumerate() {
-        out.push_str(&format!("{}. {}\n   Options: {}\n", i + 1, e.situation, e.options));
+        out.push_str(&format!(
+            "{}. {}\n   Options: {}\n",
+            i + 1,
+            e.situation,
+            e.options
+        ));
         if let Some((call, result)) = e.lookup {
             out.push_str(&format!("   Lookup: {call} -> {result}\n"));
         }
@@ -135,7 +140,13 @@ fn example_entries() -> Vec<String> {
         let patch = &(example.commit)()["state_patch"];
         for key in LIST_KEYS {
             if let Some(items) = patch[key].as_array() {
-                out.extend(items.iter().filter_map(Value::as_str).filter(|e| !e.starts_with('-')).map(str::to_lowercase));
+                out.extend(
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|e| !e.starts_with('-'))
+                        .map(str::to_lowercase),
+                );
             }
         }
     }
@@ -149,7 +160,10 @@ pub fn scrub_patch(mut patch: Value) -> Value {
     let examples = example_entries();
     for key in LIST_KEYS {
         if let Some(items) = patch.get_mut(key).and_then(Value::as_array_mut) {
-            items.retain(|e| e.as_str().is_none_or(|s| !examples.contains(&s.trim().to_lowercase())));
+            items.retain(|e| {
+                e.as_str()
+                    .is_none_or(|s| !examples.contains(&s.trim().to_lowercase()))
+            });
         }
     }
     patch
@@ -159,7 +173,11 @@ pub fn scrub_patch(mut patch: Value) -> Value {
 /// model removes them).
 pub fn scrub_state(state: &mut StrategicState) {
     let examples = example_entries();
-    for list in [&mut state.notes, &mut state.avoid_maps, &mut state.avoid_mobs] {
+    for list in [
+        &mut state.notes,
+        &mut state.avoid_maps,
+        &mut state.avoid_mobs,
+    ] {
         list.retain(|e| !examples.contains(&e.trim().to_lowercase()));
     }
 }
@@ -171,7 +189,10 @@ mod tests {
     #[test]
     fn copied_example_entries_are_scrubbed() {
         let patch = json!({"notes": ["Orc Warriors outfight a Mage at close range", "Rockers hit hard"], "avoid_maps": ["gef_fild10"]});
-        assert_eq!(scrub_patch(patch), json!({"notes": ["Rockers hit hard"], "avoid_maps": []}));
+        assert_eq!(
+            scrub_patch(patch),
+            json!({"notes": ["Rockers hit hard"], "avoid_maps": []})
+        );
     }
 
     #[test]

@@ -81,7 +81,8 @@ impl Memory {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join(format!("{}.json", name.to_lowercase()));
         let mut memory: Memory = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?,
+            Ok(text) => serde_json::from_str(&text)
+                .with_context(|| format!("parsing {}", path.display()))?,
             Err(_) => Memory::default(),
         };
         memory.path = path;
@@ -105,7 +106,10 @@ impl Memory {
     pub fn record_fight(&mut self, mob: &str, level: u32, won: bool) {
         let record = self.fights.entry(mob.to_owned()).or_default();
         if record.level + RECORD_LEVELS <= level {
-            *record = FightRecord { level, ..Default::default() };
+            *record = FightRecord {
+                level,
+                ..Default::default()
+            };
         }
         if won {
             record.kills += 1;
@@ -118,7 +122,11 @@ impl Memory {
     pub fn losing_to(&self, level: u32) -> Vec<String> {
         self.fights
             .iter()
-            .filter(|(_, r)| r.level + RECORD_LEVELS > level && r.deaths >= DEATHS_TO_AVOID && r.kills < KILLS_PER_DEATH * r.deaths)
+            .filter(|(_, r)| {
+                r.level + RECORD_LEVELS > level
+                    && r.deaths >= DEATHS_TO_AVOID
+                    && r.kills < KILLS_PER_DEATH * r.deaths
+            })
             .map(|(mob, _)| mob.clone())
             .collect()
     }

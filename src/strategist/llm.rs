@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use smolgent::{ChatMessage, ChatProvider, ChatResponse, ProviderConfig};
 
 /// A strategist step or a helper question that takes longer than this is dropped.
-pub const LLM_TIMEOUT: Duration = Duration::from_secs(90);
+pub const LLM_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct Llm {
@@ -40,11 +40,17 @@ pub enum ContextMode {
 
 impl Llm {
     /// `think`: tokens the model may reason before a strategist answer; the reasoning is never sent back.
-    pub fn new(base_url: &str, model: &str, think: u32, sampling: &crate::config::Sampling) -> Result<Self> {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        think: u32,
+        sampling: &crate::config::Sampling,
+    ) -> Result<Self> {
         let config = || -> Result<ProviderConfig> {
             let mut c = ProviderConfig::llama_cpp(base_url, model).map_err(|e| anyhow!("{e}"))?;
             // The model thinks at length by default; llama.cpp ignores `reasoning.enabled = false` and only honours this.
-            c.extra_body.insert("thinking_budget_tokens".into(), json!(think));
+            c.extra_body
+                .insert("thinking_budget_tokens".into(), json!(think));
             for (key, value) in sampling.fields() {
                 c.extra_body.insert(key.into(), value);
             }
@@ -52,7 +58,9 @@ impl Llm {
         };
         let free = ChatProvider::new(config()?);
         let mut forced_config = config()?;
-        forced_config.extra_body.insert("tool_choice".into(), json!("required"));
+        forced_config
+            .extra_body
+            .insert("tool_choice".into(), json!("required"));
         Ok(Self {
             free,
             forced: ChatProvider::new(forced_config),
@@ -68,25 +76,63 @@ impl Llm {
     /// Whether the server answers `/health`.
     pub async fn healthy(&self) -> bool {
         let url = format!("{}/health", self.base_url);
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build();
         match client {
-            Ok(c) => c.get(url).send().await.map(|r| r.status().is_success()).unwrap_or(false),
+            Ok(c) => c
+                .get(url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false),
             Err(_) => false,
         }
     }
 
+    /// Whether llama.cpp has an idle slot now (`/slots`). A server that does not say is taken to have one.
+    pub async fn slot_free(&self) -> bool {
+        let url = format!("{}/slots", self.base_url);
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+        else {
+            return true;
+        };
+        let Ok(response) = client.get(url).send().await else {
+            return true;
+        };
+        let Ok(slots) = response.json::<Vec<Value>>().await else {
+            return true;
+        };
+        slots.is_empty()
+            || slots
+                .iter()
+                .any(|s| s.get("is_processing").and_then(Value::as_bool) != Some(true))
+    }
+
     /// One request whose answer must match `schema` (grammar-constrained by llama.cpp), parsed as JSON.
-    pub async fn ask_json(&self, system: &str, user: &str, schema: Value, max_tokens: u32) -> Result<Value> {
+    pub async fn ask_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Value,
+        max_tokens: u32,
+    ) -> Result<Value> {
         let messages = [ChatMessage::system(system), ChatMessage::user(user)];
         let mut request = self.free.build_request(&messages, Vec::new());
-        request.response_format = Some(json!({"type": "json_schema", "json_schema": {"schema": schema}}));
+        request.response_format =
+            Some(json!({"type": "json_schema", "json_schema": {"schema": schema}}));
         // Dialog and chat answers are simple, and thinking does not mix well with grammar sampling.
-        request.extra.insert("thinking_budget_tokens".into(), json!(0));
+        request
+            .extra
+            .insert("thinking_budget_tokens".into(), json!(0));
         request.max_tokens = Some(max_tokens);
-        let response: ChatResponse = tokio::time::timeout(LLM_TIMEOUT, self.free.send_request(request))
-            .await
-            .context("LLM timed out")?
-            .map_err(|e| anyhow!("LLM request failed: {e}"))?;
+        let response: ChatResponse =
+            tokio::time::timeout(LLM_TIMEOUT, self.free.send_request(request))
+                .await
+                .context("LLM timed out")?
+                .map_err(|e| anyhow!("LLM request failed: {e}"))?;
         let text = response.message.content.text();
         parse_json_loose(&text).with_context(|| format!("LLM answer is not JSON: {text}"))
     }
@@ -109,7 +155,10 @@ mod tests {
 
     #[test]
     fn loose_json_handles_fences() {
-        assert_eq!(parse_json_loose("```json\n{\"a\": 1}\n```"), Some(json!({"a": 1})));
+        assert_eq!(
+            parse_json_loose("```json\n{\"a\": 1}\n```"),
+            Some(json!({"a": 1}))
+        );
         assert_eq!(parse_json_loose("{\"a\": 1}"), Some(json!({"a": 1})));
         assert_eq!(parse_json_loose("nope"), None);
     }

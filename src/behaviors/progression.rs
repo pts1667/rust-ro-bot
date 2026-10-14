@@ -38,11 +38,37 @@ pub fn next_stat(stats: [u32; 6], points: u32, build: &str) -> Option<&'static s
 fn preferred_skills(job: &str) -> &'static [&'static str] {
     match job.to_lowercase().as_str() {
         "novice" => &["NV_BASIC"],
-        "swordman" | "swordsman" => &["SM_SWORD", "SM_BASH", "SM_RECOVERY", "SM_PROVOKE", "SM_MAGNUM", "SM_ENDURE"],
-        "mage" | "magician" => &["MG_FIREBOLT", "MG_SRECOVERY", "MG_COLDBOLT", "MG_LIGHTNINGBOLT", "MG_NAPALMBEAT", "MG_SOULSTRIKE"],
+        "swordman" | "swordsman" => &[
+            "SM_SWORD",
+            "SM_BASH",
+            "SM_RECOVERY",
+            "SM_PROVOKE",
+            "SM_MAGNUM",
+            "SM_ENDURE",
+        ],
+        "mage" | "magician" => &[
+            "MG_FIREBOLT",
+            "MG_SRECOVERY",
+            "MG_COLDBOLT",
+            "MG_LIGHTNINGBOLT",
+            "MG_NAPALMBEAT",
+            "MG_SOULSTRIKE",
+        ],
         "archer" => &["AC_OWL", "AC_VULTURE", "AC_DOUBLE", "AC_CONCENTRATION"],
-        "acolyte" => &["AL_HEAL", "AL_BLESSING", "AL_INCAGI", "AL_DP", "AL_DEMONBANE"],
-        "merchant" => &["MC_INCCARRY", "MC_DISCOUNT", "MC_OVERCHARGE", "MC_PUSHCART", "MC_MAMMONITE"],
+        "acolyte" => &[
+            "AL_HEAL",
+            "AL_BLESSING",
+            "AL_INCAGI",
+            "AL_DP",
+            "AL_DEMONBANE",
+        ],
+        "merchant" => &[
+            "MC_INCCARRY",
+            "MC_DISCOUNT",
+            "MC_OVERCHARGE",
+            "MC_PUSHCART",
+            "MC_MAMMONITE",
+        ],
         "thief" => &["TF_DOUBLE", "TF_MISS", "TF_STEAL", "TF_HIDING", "TF_POISON"],
         _ => &[],
     }
@@ -51,7 +77,11 @@ fn preferred_skills(job: &str) -> &'static [&'static str] {
 /// Skill names (`AB_CDEF`) mentioned in a refusal, which lists what can be learned now.
 pub fn skill_names_in(text: &str) -> Vec<String> {
     text.split(|c: char| !(c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()))
-        .filter(|w| w.len() > 3 && w.contains('_') && w.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+        .filter(|w| {
+            w.len() > 3
+                && w.contains('_')
+                && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -77,7 +107,13 @@ impl Bot {
         let mut raised = Vec::new();
         for _ in 0..150 {
             let obs = self.observe().await?;
-            let Some(stat) = next_stat(stats_of(&obs), obs.me.status_points, &self.memory.strategy.stat_build) else { break };
+            let Some(stat) = next_stat(
+                stats_of(&obs),
+                obs.me.status_points,
+                &self.memory.strategy.stat_build,
+            ) else {
+                break;
+            };
             let before = obs.me.stats.get(stat);
             let result = self.act(Action::RaiseStat { stat, amount: 1 }).await;
             let value = match &result {
@@ -130,9 +166,20 @@ impl Bot {
                 break;
             }
             let job = obs.me.job.clone();
-            let candidates: Vec<String> = preferred_skills(&job).iter().map(|s| (*s).to_owned()).chain(offered.iter().cloned()).collect();
-            let Some(skill) = candidates.into_iter().find(|s| !failed.contains(s)) else { break };
-            match self.act(Action::LearnSkill { skill: skill.clone() }).await {
+            let candidates: Vec<String> = preferred_skills(&job)
+                .iter()
+                .map(|s| (*s).to_owned())
+                .chain(offered.iter().cloned())
+                .collect();
+            let Some(skill) = candidates.into_iter().find(|s| !failed.contains(s)) else {
+                break;
+            };
+            match self
+                .act(Action::LearnSkill {
+                    skill: skill.clone(),
+                })
+                .await
+            {
                 Ok(_) => learned.push(skill),
                 Err(error) => {
                     tracing::debug!(%skill, %error, "learn_skill refused");
@@ -153,28 +200,44 @@ impl Bot {
             return Ok(Outcome::failed("no skill could be learned"));
         }
         learned.dedup();
-        self.memory.note(format!("learned skills: {}", learned.join(", ")));
+        self.memory
+            .note(format!("learned skills: {}", learned.join(", ")));
         Ok(Outcome::Done)
     }
 
     /// Asks the Job Master (on the current map) for a job change.
     pub async fn change_job(&mut self, job: &str) -> Result<Outcome> {
         let obs = self.observe().await?;
-        let Some(npc) = obs.npcs.iter().find(|n| n.name.to_lowercase().contains("job master")).map(|n| n.id) else {
-            return Ok(Outcome::failed(format!("no Job Master on {}", obs.map.name)));
+        let Some(npc) = obs
+            .npcs
+            .iter()
+            .find(|n| n.name.to_lowercase().contains("job master"))
+            .map(|n| n.id)
+        else {
+            return Ok(Outcome::failed(format!(
+                "no Job Master on {}",
+                obs.map.name
+            )));
         };
         let result = self.act(Action::Use { target: npc }).await?;
         let intent = Intent {
             goal: format!("Change job from Novice to {job}. Accept the job change."),
-            keywords: job_keywords(job).into_iter().chain(["yes".to_owned(), "change".to_owned()]).collect(),
+            keywords: job_keywords(job)
+                .into_iter()
+                .chain(["yes".to_owned(), "change".to_owned()])
+                .collect(),
             ..Default::default()
         };
         let end = self.run_dialog(dialog_of(&result), &intent).await?;
         let after = self.observe().await?;
         if after.me.job.eq_ignore_ascii_case(&obs.me.job) {
-            return Ok(Outcome::failed(format!("still {} after the Job Master ({end:?})", after.me.job)));
+            return Ok(Outcome::failed(format!(
+                "still {} after the Job Master ({end:?})",
+                after.me.job
+            )));
         }
-        self.memory.note(format!("changed job: {} -> {}", obs.me.job, after.me.job));
+        self.memory
+            .note(format!("changed job: {} -> {}", obs.me.job, after.me.job));
         Ok(Outcome::Done)
     }
 }
@@ -187,7 +250,10 @@ mod tests {
     fn melee_build_raises_str_first() {
         assert_eq!(next_stat([1, 1, 1, 1, 1, 1], 48, "melee"), Some("str"));
         // STR 9 is far ahead of its share, so AGI or DEX come next.
-        assert!(matches!(next_stat([9, 1, 1, 1, 1, 1], 30, "melee"), Some("agi") | Some("dex") | Some("vit")));
+        assert!(matches!(
+            next_stat([9, 1, 1, 1, 1, 1], 30, "melee"),
+            Some("agi") | Some("dex") | Some("vit")
+        ));
     }
 
     #[test]

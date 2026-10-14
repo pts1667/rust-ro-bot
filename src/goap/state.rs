@@ -78,13 +78,22 @@ pub fn is_loot_item(item: &InventoryItem, keep: &[u32]) -> bool {
 
 /// The arrows the bot carries, equipped or not.
 pub fn arrow_count(obs: &Observation) -> u32 {
-    obs.inventory.iter().filter(|i| i.kind.eq_ignore_ascii_case("ammo")).map(|i| i.amount).sum()
+    obs.inventory
+        .iter()
+        .filter(|i| i.kind.eq_ignore_ascii_case("ammo"))
+        .map(|i| i.amount)
+        .sum()
 }
 
 impl WorldState {
     pub fn from_observation(obs: &Observation, extra: &Extra) -> Self {
         let me = &obs.me;
-        let loot_items = obs.inventory.iter().filter(|i| is_loot_item(i, &extra.keep)).map(|i| i.amount).sum::<u32>();
+        let loot_items = obs
+            .inventory
+            .iter()
+            .filter(|i| is_loot_item(i, &extra.keep))
+            .map(|i| i.amount)
+            .sum::<u32>();
         let price = extra.potion_price.max(1);
         WorldState {
             map: obs.map.name.clone(),
@@ -99,7 +108,12 @@ impl WorldState {
             skill_points: me.skill_points > 0,
             job: me.job.clone(),
             job_change_ready: !next_jobs(&me.job).is_empty()
-                && me.job_level >= if me.job.eq_ignore_ascii_case("novice") { 10 } else { 40 },
+                && me.job_level
+                    >= if me.job.eq_ignore_ascii_case("novice") {
+                        10
+                    } else {
+                        40
+                    },
             hunted: false,
             ammo_low: uses_bow(&me.job) && arrow_count(obs) < ARROW_MIN,
             items: obs.inventory.iter().fold(BTreeMap::new(), |mut m, i| {
@@ -128,7 +142,9 @@ pub fn next_jobs(job: &str) -> &'static [&'static str] {
 /// True when the status points cover raising some stat.
 pub fn can_raise_any(obs: &Observation) -> bool {
     let s = &obs.me.stats;
-    [s.str, s.agi, s.vit, s.int, s.dex, s.luk].iter().any(|v| *v < 99 && stat_cost(*v) <= obs.me.status_points)
+    [s.str, s.agi, s.vit, s.int, s.dex, s.luk]
+        .iter()
+        .any(|v| *v < 99 && stat_cost(*v) <= obs.me.status_points)
 }
 
 /// Points to raise a stat from `value` (pre-renewal, rathena's `PC_STATUS_POINT_COST`): 2 up to 10, 3 up to 20, ... 11 at 98.

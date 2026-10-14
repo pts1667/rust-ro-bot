@@ -44,22 +44,38 @@ const OPENERS: [(&str, u32); 8] = [
 
 /// Whether the job's attack is its spells: a Mage's staff hits for little.
 fn casts_to_fight(job: &str) -> bool {
-    matches!(crate::knowledge::gear::normal_job(job).as_str(), "mage" | "wizard" | "sage")
+    matches!(
+        crate::knowledge::gear::normal_job(job).as_str(),
+        "mage" | "wizard" | "sage"
+    )
 }
 
 impl Bot {
     /// Picks the best monster to fight on this map, if any; within `area` (a cell and a radius) when given. Monsters
     /// another player fights are theirs; those that attack a party member come first.
-    pub async fn pick_target(&mut self, obs: &Observation, area: Option<((u16, u16), u32)>) -> Result<Option<(u64, String)>> {
+    pub async fn pick_target(
+        &mut self,
+        obs: &Observation,
+        area: Option<((u16, u16), u32)>,
+    ) -> Result<Option<(u64, String)>> {
         let fighter = self.knowledge.fighter(obs).await?;
         let me = obs.pos();
-        let avoid: Vec<String> =
-            self.memory.strategy.avoid_mobs.iter().chain(&self.memory.losing_to(obs.me.base_level)).map(|s| s.to_lowercase()).collect();
+        let avoid: Vec<String> = self
+            .memory
+            .strategy
+            .avoided_mobs(obs.me.base_level)
+            .iter()
+            .chain(&self.memory.losing_to(obs.me.base_level))
+            .map(|s| s.to_lowercase())
+            .collect();
         let members = member_ids(obs);
         let mut best: Option<(f32, u64, String)> = None;
         let mobs = obs.mobs.clone();
         for mob in &mobs {
-            if mob.hp == 0 || self.is_blacklisted(mob.id) || avoid.contains(&mob.name.to_lowercase()) {
+            if mob.hp == 0
+                || self.is_blacklisted(mob.id)
+                || avoid.contains(&mob.name.to_lowercase())
+            {
                 continue;
             }
             if taken_by_others(obs, mob.id, mob.target, &members) {
@@ -71,13 +87,18 @@ impl Bot {
             if obs.near_warp((mob.x, mob.y), WARP_MARGIN) {
                 continue;
             }
-            let Some(info) = self.mob_info(mob.mob_id).await else { continue };
+            let Some(info) = self.mob_info(mob.mob_id).await else {
+                continue;
+            };
             if !fighter.can_fight(&info) {
                 continue;
             }
             // Steer clear of targets standing next to monsters that would join in and are too strong.
             let mut crowded = false;
-            for other in mobs.iter().filter(|o| o.id != mob.id && dist((o.x, o.y), (mob.x, mob.y)) <= 5) {
+            for other in mobs
+                .iter()
+                .filter(|o| o.id != mob.id && dist((o.x, o.y), (mob.x, mob.y)) <= 5)
+            {
                 if let Some(o) = self.mob_info(other.mob_id).await
                     && o.aggressive()
                     && !fighter.can_fight(&o)
@@ -91,8 +112,12 @@ impl Bot {
             let a = fighter.assess(&info);
             let d = dist(me, (mob.x, mob.y)) as f32;
             // Walking costs ~0.15 s a cell: rank by experience per second including the walk.
-            let mut value = info.exp as f32 / (a.kill_secs + d * 0.15 + 2.0) * (1.0 - a.danger * 0.5);
-            if mob.target.is_some_and(|t| t != obs.me.char_id && members.contains(&t)) {
+            let mut value =
+                info.exp as f32 / (a.kill_secs + d * 0.15 + 2.0) * (1.0 - a.danger * 0.5);
+            if mob
+                .target
+                .is_some_and(|t| t != obs.me.char_id && members.contains(&t))
+            {
                 value *= ASSIST_BONUS;
             }
             if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
@@ -116,7 +141,11 @@ impl Bot {
                 return Ok(if obs.mobs.is_empty() {
                     Outcome::failed(format!("no monsters on {}", obs.map.name))
                 } else {
-                    Outcome::failed(format!("nothing safe to fight on {} ({} monsters)", obs.map.name, obs.mobs.len()))
+                    Outcome::failed(format!(
+                        "nothing safe to fight on {} ({} monsters)",
+                        obs.map.name,
+                        obs.mobs.len()
+                    ))
                 });
             }
             return self.search(&obs).await;
@@ -137,25 +166,45 @@ impl Bot {
         for _ in 0..4 {
             let (dx, dy) = {
                 let mut rng = rand::rng();
-                (rng.random_range(-SEARCH_STEP..=SEARCH_STEP), rng.random_range(-SEARCH_STEP..=SEARCH_STEP))
+                (
+                    rng.random_range(-SEARCH_STEP..=SEARCH_STEP),
+                    rng.random_range(-SEARCH_STEP..=SEARCH_STEP),
+                )
             };
             let tx = (x + dx).clamp(MAP_MARGIN, (w - MAP_MARGIN).max(MAP_MARGIN)) as u16;
             let ty = (y + dy).clamp(MAP_MARGIN, (h - MAP_MARGIN).max(MAP_MARGIN)) as u16;
             if obs.near_warp((tx, ty), WARP_MARGIN) {
                 continue;
             }
-            if self.act(Action::Move { x: tx, y: ty, wait: true }).await.is_ok() {
+            if self
+                .act(Action::Move {
+                    x: tx,
+                    y: ty,
+                    wait: true,
+                })
+                .await
+                .is_ok()
+            {
                 tracing::debug!(x = tx, y = ty, "searching for monsters");
                 return Ok(Outcome::Done);
             }
         }
-        Ok(Outcome::failed(format!("cannot walk anywhere on {}", obs.map.name)))
+        Ok(Outcome::failed(format!(
+            "cannot walk anywhere on {}",
+            obs.map.name
+        )))
     }
 
     /// Fights `target` until it is gone, the bot dies or the fight times out.
     pub async fn fight(&mut self, target: u64, name: &str) -> Result<Outcome> {
         let start = Instant::now();
-        if let Err(error) = self.act(Action::Attack { target, wait: false }).await {
+        if let Err(error) = self
+            .act(Action::Attack {
+                target,
+                wait: false,
+            })
+            .await
+        {
             self.blacklist(target, 120);
             return Ok(Outcome::failed(format!("cannot attack {name}: {error}")));
         }
@@ -169,12 +218,24 @@ impl Bot {
             Bot::pause(POLL_MS).await;
             let obs = self.observe().await?;
             if obs.me.dead {
-                *self.memory.deaths_by_cause.entry(name.to_owned()).or_default() += 1;
+                *self
+                    .memory
+                    .deaths_by_cause
+                    .entry(name.to_owned())
+                    .or_default() += 1;
                 self.memory.record_fight(name, obs.me.base_level, false);
-                if self.memory.losing_to(obs.me.base_level).iter().any(|m| m == name) {
-                    self.memory.note(format!("{name} keeps killing me: leaving it alone for a few levels"));
+                if self
+                    .memory
+                    .losing_to(obs.me.base_level)
+                    .iter()
+                    .any(|m| m == name)
+                {
+                    self.memory.note(format!(
+                        "{name} keeps killing me: leaving it alone for a few levels"
+                    ));
                 }
-                self.memory.note(format!("died fighting {name} on {}", obs.map.name));
+                self.memory
+                    .note(format!("died fighting {name} on {}", obs.map.name));
                 return Ok(Outcome::failed(format!("died fighting {name}")));
             }
             let Some(mob) = obs.mobs.iter().find(|m| m.id == target) else {
@@ -188,7 +249,10 @@ impl Bot {
             };
             last_pos = Some((mob.x, mob.y));
             // A new goal, or someone talking to the bot, while it walks to a monster that is not fighting yet: that first
-            if self.preempted() && mob.target != Some(obs.me.char_id) && dist(obs.pos(), (mob.x, mob.y)) > 3 {
+            if self.preempted()
+                && mob.target != Some(obs.me.char_id)
+                && dist(obs.pos(), (mob.x, mob.y)) > 3
+            {
                 self.act(Action::Stop).await.ok();
                 return Ok(Outcome::Preempted);
             }
@@ -200,25 +264,56 @@ impl Bot {
                 && let Some(heal) = self.knowledge.heal_action(&obs)
             {
                 self.act(heal.action).await.ok();
-                self.act(Action::Attack { target, wait: false }).await.ok();
+                self.act(Action::Attack {
+                    target,
+                    wait: false,
+                })
+                .await
+                .ok();
                 continue;
             }
-            if (!opened || caster && obs.me.action != "using_skill") && dist(obs.pos(), (mob.x, mob.y)) <= 9 {
+            if (!opened || caster && obs.me.action != "using_skill")
+                && dist(obs.pos(), (mob.x, mob.y)) <= 9
+            {
                 opened = true;
-                if let Some((skill, _)) = OPENERS.iter().find(|(s, sp)| obs.skill_level(s) > 0 && obs.me.sp >= *sp) {
-                    self.act(Action::Skill { skill: (*skill).to_owned(), target: Some(target) }).await.ok();
+                if let Some((skill, _)) = OPENERS
+                    .iter()
+                    .find(|(s, sp)| obs.skill_level(s) > 0 && obs.me.sp >= *sp)
+                {
+                    self.act(Action::Skill {
+                        skill: (*skill).to_owned(),
+                        target: Some(target),
+                    })
+                    .await
+                    .ok();
                     Bot::pause(600).await;
-                    self.act(Action::Attack { target, wait: false }).await.ok();
+                    self.act(Action::Attack {
+                        target,
+                        wait: false,
+                    })
+                    .await
+                    .ok();
                 }
             }
-            if obs.me.action != "attacking" && !obs.me.moving && stalled_since.elapsed() > Duration::from_secs(3) {
+            if obs.me.action != "attacking"
+                && !obs.me.moving
+                && stalled_since.elapsed() > Duration::from_secs(3)
+            {
                 // The fight stopped on its own (path blocked, target moved away): try again.
-                if self.act(Action::Attack { target, wait: false }).await.is_err() {
+                if self
+                    .act(Action::Attack {
+                        target,
+                        wait: false,
+                    })
+                    .await
+                    .is_err()
+                {
                     self.blacklist(target, 120);
                     return Ok(Outcome::failed(format!("lost {name}")));
                 }
             }
-            if start.elapsed() > FIGHT_TIMEOUT || stalled_since.elapsed() > Duration::from_secs(15) {
+            if start.elapsed() > FIGHT_TIMEOUT || stalled_since.elapsed() > Duration::from_secs(15)
+            {
                 self.act(Action::Stop).await.ok();
                 self.blacklist(target, 300);
                 return Ok(Outcome::failed(format!("fight with {name} took too long")));
@@ -231,8 +326,12 @@ impl Bot {
     async fn loot_near(&mut self, pos: (u16, u16), radius: u32) -> Result<()> {
         let obs = self.observe().await?;
         // An item on a warp would take the bot off the map, again each time it comes back.
-        let mut items: Vec<_> =
-            obs.items.iter().filter(|i| dist((i.x, i.y), pos) <= radius && !obs.near_warp((i.x, i.y), WARP_MARGIN)).cloned().collect();
+        let mut items: Vec<_> = obs
+            .items
+            .iter()
+            .filter(|i| dist((i.x, i.y), pos) <= radius && !obs.near_warp((i.x, i.y), WARP_MARGIN))
+            .cloned()
+            .collect();
         items.retain(|i| !self.is_blacklisted(i.id));
         items.sort_by_key(|i| dist((i.x, i.y), obs.pos()));
         let before: u32 = obs.inventory.iter().map(|i| i.amount).sum();
@@ -245,7 +344,13 @@ impl Bot {
             }
         }
         if tried > 0 {
-            let after: u32 = self.observe().await?.inventory.iter().map(|i| i.amount).sum();
+            let after: u32 = self
+                .observe()
+                .await?
+                .inventory
+                .iter()
+                .map(|i| i.amount)
+                .sum();
             let got = after.saturating_sub(before);
             self.memory.counters.loot_picked += got as u64;
             tracing::debug!(tried, got, "loot");
@@ -279,9 +384,16 @@ impl Bot {
             if obs.me.hp < last_hp {
                 // Something hits the bot: fight back against what attacks it, else the nearest monster.
                 let me = obs.pos();
-                let attacker = obs.mobs.iter().find(|m| m.target == Some(obs.me.char_id)).or_else(|| {
-                    obs.mobs.iter().filter(|m| dist((m.x, m.y), me) <= 3).min_by_key(|m| dist((m.x, m.y), me))
-                });
+                let attacker = obs
+                    .mobs
+                    .iter()
+                    .find(|m| m.target == Some(obs.me.char_id))
+                    .or_else(|| {
+                        obs.mobs
+                            .iter()
+                            .filter(|m| dist((m.x, m.y), me) <= 3)
+                            .min_by_key(|m| dist((m.x, m.y), me))
+                    });
                 if let Some(m) = attacker {
                     let (id, name) = (m.id, m.name.clone());
                     self.act(Action::Stand).await.ok();

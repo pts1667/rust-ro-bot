@@ -34,8 +34,11 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 
 - Reference: `http://127.0.0.1:6904/db/...` and `/wiki/<Page>.md`, no key. Responses are cached in `cache/db/`
   (gitignored). Delete the cache when the server data changes.
-- LLM: llama.cpp at `http://127.0.0.1:8080` (LFM2.5-2.6B, 2 slots). Send `thinking_budget_tokens: 0`, or it spends
+- LLM: llama.cpp at `http://127.0.0.1:8080` (LFM2.5-2.6B, 2 slots). Thinking defaults to a budget of 2048 tokens (`--llm-think`); without `thinking_budget_tokens` it spends
   ~1000 tokens thinking. Do not use `chat_template_kwargs.enable_thinking=false`, which breaks grammar sampling.
+- Decision model: llama.cpp `/v1/systemone` at `http://127.0.0.1:9931` (`--s1-url`), used with `--voice system-one`
+  for chat, dialogs, the forum, notes and its `--llm-share` of the goals. A request must fit in the server's physical
+  batch (`-ub`).
 - Server logs: `D:\downloads\ro-sppack\logs\server.log`.
 
 ## Bot API
@@ -46,16 +49,19 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 - Live test characters so far: `Rusty` (char 150003, in Geffen, unused by the rewrite) and `Goapy` (char 150002, the
   rewrite's test bot). Bot memory is in `state/<name>.json` (gitignored).
 - Actions go to `POST /bots/{name}/actions`. Errors are `{"error": "..."}`.
+- Forum: `/forum/...` on the same port, docs at `GET /forum/SKILL.md` (source: `server/src/server/forum/SKILL.md`). A bot
+  sends the bot key with `X-Forum-As: <name>`. Rate limits are per character and reset when the server restarts.
 
 ## Running the bot
 
 ```
 cargo run -- --key-file "D:/downloads/ro-sppack/rust-ro/config/bots_api_key.txt" --name Goapy probe
 cargo run -- --key-file ... --name Goapy run --minutes 10      # add --no-llm for the deterministic strategist
+cargo run -- --key-file ... --name Goapy run --voice system-one --llm-share 0.25  # the decision model talks, takes notes, picks 25% of goals
 cargo run -- --key-file ... --name Goapy llm-check             # one strategist step, prints prompt and decision
 cargo run -- --key-file ... --name Alfa run --party Wayfarers --friends Alfa,Bravo --lead   # one process per member
 # without --party a bot finds a party on the booking board by itself; --solo plays alone
-cargo run -- db maps/prt_fild08                                # also: db grounds [map], db route from:to
+cargo run -- db maps/prt_fild08                                # also: db grounds [map], db route from:to, db farm <item id>[@map]
 ```
 
 `probe` creates the character if it does not exist, connects it if it does not, and prints a summary. In Git Bash, a
