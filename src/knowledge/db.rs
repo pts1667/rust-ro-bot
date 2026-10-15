@@ -63,6 +63,10 @@ pub struct MapData {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Transport {
+    pub npc: Link,
+    pub x: u16,
+    pub y: u16,
+    pub region: Option<u32>,
     /// What the NPC's script checks first (`zeny`, `item`, `quest`, `level`, `job`, `variable`): the way has a
     /// condition.
     pub checks: Vec<String>,
@@ -72,6 +76,24 @@ pub struct Transport {
 }
 
 impl Transport {
+    /// The places it sends to, as `(map, x, y, region)`; none for a warper's link.
+    pub fn destinations(&self) -> Vec<(String, u16, u16, Option<u32>)> {
+        let Some(to) = self.to.as_array() else {
+            return Vec::new();
+        };
+        to.iter()
+            .filter_map(|t| {
+                let cell = |k: &str| t[k].as_u64().and_then(|v| u16::try_from(v).ok());
+                Some((
+                    t["map"]["id"].as_str()?.to_owned(),
+                    cell("x")?,
+                    cell("y")?,
+                    t["region"].as_u64().map(|r| r as u32),
+                ))
+            })
+            .collect()
+    }
+
     /// Whether the NPC leads to `map`, but only under a condition.
     pub fn gates(&self, map: &str) -> bool {
         !self.checks.is_empty()

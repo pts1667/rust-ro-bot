@@ -13,7 +13,7 @@ use crate::api::observation::Warp;
 use crate::api::{Action, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::state::HP_LOW;
-use crate::knowledge::graph::Edge;
+use crate::knowledge::graph::{Edge, npc_way};
 use crate::knowledge::grounds::lethal_monster;
 
 /// Most warps one trip takes before giving up.
@@ -56,6 +56,8 @@ pub const GO_TOWNS: &[&str] = &[
     "veins",
     "moscovia",
 ];
+/// How near the bot walks to an NPC way it cannot see yet, before looking for the NPC again.
+const NPC_NEAR: u32 = 5;
 /// Maps around the destination searched for a town to `@go` to.
 const GO_SEARCH_HOPS: u32 = 6;
 /// Start of the failure reason of a warp in another part of the map (another room of an interior map).
@@ -466,6 +468,9 @@ impl Bot {
     /// Steps on the warp of `edge`, from the map the bot is on, around the warps it stepped on by mistake before. A
     /// walk that ends on another map than the edge's is a failure: the warp it crossed is kept, to go around it.
     async fn take_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
+        if edge.npc.is_some() {
+            return self.ask_npc_way(edge).await;
+        }
         let from = obs.map.name.clone();
         if edge.to != from
             && let Some(outcome) = self.clear_of_warps(obs, edge).await?
@@ -631,6 +636,110 @@ impl Bot {
             "could not reach the warp to {} at ({}, {})",
             edge.to, edge.x, edge.y
         )))
+    }
+
+    /// Asks the NPC of `edge` to send the bot on (`NPC_WAYS`): the nearest NPC of that kind on the map, walked to when
+    /// out of sight. One that does not send the bot is no way from then on.
+    async fn ask_npc_way(&mut self, edge: &Edge) -> Result<Outcome> {
+        let Some(way) = edge.npc.as_deref().and_then(|n| npc_way(n, &edge.to)) else {
+            return Ok(Outcome::failed(format!("no known talk to {}", edge.to)));
+        };
+        let from = edge.from.clone();
+        let fail = |bot: &mut Bot, reason: String| {
+            if !bot.memory.bad_warps.contains(&edge.key()) {
+                bot.memory.bad_warps.push(edge.key());
+                bot.memory.note(format!(
+                    "the {} on {from} does not send me to {}",
+                    way.npc, edge.to
+                ));
+            }
+            bot.knowledge.graph.forbid([edge.key()]);
+            Outcome::failed(reason)
+        };
+        let mut obs = self.observe().await?;
+        // The nearest of its kind: there is one at every landing on moc_fild20
+        let spot = self
+            .knowledge
+            .graph
+            .edges(&from)
+            .await?
+            .into_iter()
+            .filter(|e| e.to == edge.to && e.npc.as_deref().is_some_and(|n| n.starts_with(way.npc)))
+            .map(|e| (e.x, e.y))
+            .min_by_key(|s| dist(*s, obs.pos()))
+            .unwrap_or((edge.x, edge.y));
+        let seen = |obs: &Observation| {
+            obs.npcs
+                .iter()
+                .filter(|n| n.name.starts_with(way.npc))
+                .min_by_key(|n| dist((n.x, n.y), obs.pos()))
+                .map(|n| n.id)
+        };
+        if seen(&obs).is_none() && dist(obs.pos(), spot) > NPC_NEAR {
+            tracing::info!(on = %from, npc = way.npc, to = %edge.to, ?spot, "walking to an NPC way");
+            let (api, name) = (self.api.clone(), self.name.clone());
+            let action = Action::Move {
+                x: spot.0,
+                y: spot.1,
+                wait: true,
+            };
+            let walk = tokio::spawn(async move { api.act(&name, &action).await });
+            match self.guard_walk(&from, walk, true).await?.0 {
+                Walk::MapChanged => return Ok(Outcome::Done),
+                Walk::Preempted => return Ok(Outcome::Preempted),
+                Walk::Dead { attacker } => return Ok(self.died_on_the_way(&from, attacker)),
+                Walk::FightBack { target, name } => {
+                    self.fight(target, &name).await?;
+                    return Ok(Outcome::failed(format!(
+                        "fought {name} on the way to the {}",
+                        way.npc
+                    )));
+                }
+                Walk::Ended(_) => {}
+            }
+            obs = self.observe().await?;
+        }
+        let Some(npc) = seen(&obs) else {
+            return Ok(fail(self, format!("no {} in sight on {from}", way.npc)));
+        };
+        tracing::info!(on = %from, npc = way.npc, to = %edge.to, "asking an NPC for the way");
+        let result = match self.act(Action::Use { target: npc }).await {
+            Ok(r) => r,
+            Err(error) => {
+                return Ok(Outcome::failed(format!(
+                    "could not talk to the {}: {error}",
+                    way.npc
+                )));
+            }
+        };
+        let intent = Intent {
+            goal: format!("Be sent to {}", edge.to),
+            keywords: way.keywords.iter().map(|k| (*k).to_owned()).collect(),
+            ..Default::default()
+        };
+        let end = self.run_dialog(dialog_of(&result), &intent).await?;
+        // The script warps the bot a moment after the dialogue closes.
+        for _ in 0..10 {
+            let obs = self.observe().await?;
+            if obs.map.name != from {
+                if obs.dialog.is_some() {
+                    self.act(Action::DialogClose).await.ok();
+                }
+                tracing::info!(from = %from, to = %obs.map.name, npc = way.npc, "an NPC sent the bot on");
+                return Ok(Outcome::Done);
+            }
+            Bot::pause(300).await;
+        }
+        if self.observe().await?.dialog.is_some() {
+            self.act(Action::DialogClose).await.ok();
+        }
+        Ok(fail(
+            self,
+            format!(
+                "the {} on {from} did not send the bot to {} ({end:?})",
+                way.npc, edge.to
+            ),
+        ))
     }
 
     /// Watches a walk until it ends, the map changes, the bot dies, or an attacker worth fighting shows up. Weaker

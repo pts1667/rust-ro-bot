@@ -84,6 +84,14 @@ impl BotApi {
         serde_json::from_value(value).context("parsing connected bot")
     }
 
+    /// Takes the bot out of the game (it keeps everything; `connect` brings it back).
+    pub async fn disconnect(&self, name: &str) -> Result<Value> {
+        let req = self
+            .http
+            .post(self.url(&format!("/bots/{name}/disconnect")));
+        self.send(req).await
+    }
+
     pub async fn observation(&self, name: &str) -> Result<Observation> {
         let req = self
             .http

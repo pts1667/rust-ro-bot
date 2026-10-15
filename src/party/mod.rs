@@ -33,6 +33,8 @@ const FOLLOW_FAR: u32 = 7;
 const FOLLOW_HOPS: u32 = 6;
 /// How long the answer to "can I follow to that map" holds.
 const FOLLOW_CHECK_EVERY: Duration = Duration::from_secs(120);
+/// How long the bot follows a member who said "follow me" before it goes back to the leader.
+const FOLLOW_MEMBER_LASTS: Duration = Duration::from_secs(600);
 /// A follower fights monsters this close to the one it follows.
 const ASSIST_RADIUS: u32 = 10;
 /// Basic Skill level that creating a party takes.
@@ -123,8 +125,8 @@ pub struct PartyPlay {
     last_seq: u64,
     /// The map the leader last said it hunts on.
     pub hunt_map: Option<String>,
-    /// Someone said "follow me": follow them rather than the leader.
-    follow: Option<String>,
+    /// Someone said "follow me", and when: follow them rather than the leader for a while.
+    follow: Option<(String, Instant)>,
     /// Someone said "stay here".
     staying: bool,
     /// Members off on an errand, since when.
@@ -217,7 +219,7 @@ impl PartyPlay {
                     }
                 }
                 Said::FollowMe => {
-                    self.follow = Some(line.from);
+                    self.follow = Some((line.from, now));
                     self.staying = false;
                 }
                 Said::Stay => self.staying = true,
@@ -252,7 +254,7 @@ impl PartyPlay {
 
     /// Follows `name` rather than the leader, as when it said "follow me".
     pub fn follow_member(&mut self, name: &str) {
-        self.follow = Some(name.to_owned());
+        self.follow = Some((name.to_owned(), Instant::now()));
         self.staying = false;
     }
 
@@ -287,7 +289,20 @@ impl PartyPlay {
             return None;
         }
         let me = &obs.me.name;
-        let wanted = self.follow.as_deref().or(party.leader.as_deref())?;
+        // The leader leads: following a member, who follows the leader, held a whole party in place for 50 minutes
+        if party
+            .leader
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(me))
+        {
+            return None;
+        }
+        let asked = self
+            .follow
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < FOLLOW_MEMBER_LASTS)
+            .map(|(name, _)| name.as_str());
+        let wanted = asked.or(party.leader.as_deref())?;
         party.members.iter().find(|m| {
             m.name.eq_ignore_ascii_case(wanted)
                 && !m.name.eq_ignore_ascii_case(me)
@@ -841,6 +856,9 @@ mod tests {
         let mut obs = observation();
         obs.me.name = "Alpha".into();
         let mut play = PartyPlay::new(config(), 5);
+        assert!(play.followed(&obs).is_none());
+        // Not even a member who said "follow me", or asked it in its own words: that member follows the leader
+        play.follow_member("Beta");
         assert!(play.followed(&obs).is_none());
         obs.messages = vec![
             party_line(3, "Beta : heal please"),

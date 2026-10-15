@@ -19,6 +19,8 @@ pub struct Observation {
     pub inventory: Vec<InventoryItem>,
     pub skills: Vec<Skill>,
     pub dialog: Option<Dialog>,
+    /// The last page of the conversation the NPC closed, shown with a Close button and nothing to answer.
+    pub closed_dialog: Option<ClosedDialog>,
     pub messages: Vec<Message>,
     pub storage: Option<Value>,
     pub party: Option<Party>,
@@ -393,6 +395,13 @@ pub struct Skill {
     pub level: u32,
     pub aim: String,
     pub range: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ClosedDialog {
+    pub npc_id: u64,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

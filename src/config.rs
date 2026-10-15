@@ -94,6 +94,11 @@ pub enum Command {
     Probe,
     /// Play: GOAP executes, the LLM strategist picks goals.
     Run(RunArgs),
+    /// Walk the bot to each map in turn the way a goal's trip goes (warps, NPC ways, `@go`), and print how it ended.
+    Travel {
+        #[arg(required = true)]
+        to: Vec<String>,
+    },
     /// Print a `/db` path, e.g. `db /db/maps/prt_fild08`, or the hunting grounds with `db grounds <map>`.
     Db {
         path: String,

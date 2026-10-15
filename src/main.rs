@@ -61,6 +61,21 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Run(args) => run(&cli, knowledge, args.clone()).await,
+        Command::Travel { to } => {
+            let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
+            ensure_connected(&api, &cli.name).await?;
+            wait_ready(&api, &cli.name).await?;
+            let memory = Memory::load(&cli.endpoints.state_dir(), &cli.name)?;
+            knowledge.graph.forbid(memory.bad_warps.iter().cloned());
+            let mut bot = Bot::new(api, cli.name.clone(), knowledge, memory, None);
+            for map in to {
+                let outcome = bot.travel(map).await?;
+                let obs = bot.observe().await?;
+                println!("{map}: {outcome:?}: on {} at {:?}", obs.map.name, obs.pos());
+            }
+            bot.memory.save()?;
+            Ok(())
+        }
         Command::LlmCheck { order } => llm_check(&cli, knowledge, *order).await,
         Command::HistoryCheck {
             turns,

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::api::{Action, ApiError, Observation};
+use crate::api::{Action, ApiError, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::config::RunArgs;
 use crate::goap::state::{Extra, is_loot_item};
@@ -182,6 +182,11 @@ pub async fn run(mut bot: Bot, mut handle: Handle, args: RunArgs) -> Result<()> 
     bot.act(Action::Stop).await.ok();
     bot.memory.save()?;
     print_report(&bot, &r, started).await;
+    // A bot left in the game holds one of the server's `max_bots` places for 20 more minutes: 50 bots done with a run
+    // kept the next ones out
+    if let Err(error) = bot.api.disconnect(&bot.name).await {
+        tracing::warn!(%error, "could not leave the game");
+    }
     result
 }
 
@@ -248,6 +253,14 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
     }
 
     bot.keep = crate::quests::kept_items(&bot.memory.quests);
+    // Selling is offered once a potion shop is known, and the shop was looked up only for a trip to it, which buying
+    // potions starts with zeny a new character has none of: 45 of 50 new bots ended an hour with their loot unsold
+    if bot.memory.potion_shop.is_none()
+        && !obs.map.name.starts_with("new_")
+        && bot.shop_checked_on.as_deref() != Some(obs.map.name.as_str())
+    {
+        bot.potion_shop(&obs.map.name).await.ok();
+    }
     let mut ws = world_state(bot, &obs);
     // A Novice without a job holds its points: the strategist picks the job first, and its build decides where they go
     let awaits_job = obs.me.job.eq_ignore_ascii_case("novice")
@@ -448,9 +461,19 @@ fn give_up(bot: &mut Bot, handle: &Handle, r: &mut Run, goal: &Goal, reason: &st
         .ok();
 }
 
+/// How far from its shop spot the bot still stands at the shop.
+const AT_SHOP: u32 = 6;
+
 fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
+    // Only where the shop is: following the leader takes the bot away without a step that clears the flag, and every
+    // sale after failed at once without a walk back (88 times for 4 bots in an hour)
+    let at_shop = bot
+        .memory
+        .potion_shop
+        .as_ref()
+        .is_some_and(|s| s.map == obs.map.name && dist(obs.pos(), (s.x, s.y)) <= AT_SHOP);
     let extra = Extra {
-        near_shop: bot.near_shop,
+        near_shop: bot.near_shop && at_shop,
         potion_price: bot
             .memory
             .potion_shop

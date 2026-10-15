@@ -56,6 +56,16 @@ pub enum DialogEnd {
     GaveUp(String),
 }
 
+/// The lines of a page: one text may hold several.
+fn page_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .flat_map(|l| l.split('\n'))
+        .map(|l| l.trim_end().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 pub fn dialog_of(result: &Value) -> Option<Dialog> {
     result
         .get("dialog")
@@ -380,17 +390,21 @@ impl Bot {
                         dialog = Some(d);
                         continue;
                     }
-                    _ => return Ok(DialogEnd::Closed),
+                    _ => {
+                        // The page the script closed on: its last words, often what it asks for
+                        let last = obs
+                            .closed_dialog
+                            .map(|c| page_lines(&c.lines))
+                            .unwrap_or_default();
+                        if !last.is_empty() && !transcript.ends_with(&last) {
+                            tracing::debug!(lines = ?last, "dialog closed on a page");
+                            self.last_dialog.extend(last);
+                        }
+                        return Ok(DialogEnd::Closed);
+                    }
                 }
             };
-            // A page may come as one text of several lines.
-            let lines: Vec<String> = d
-                .lines
-                .iter()
-                .flat_map(|l| l.split('\n'))
-                .map(|l| l.trim_end().to_owned())
-                .filter(|l| !l.is_empty())
-                .collect();
+            let lines = page_lines(&d.lines);
             transcript.extend(lines.iter().cloned());
             self.last_dialog.extend(lines);
             let kind = d

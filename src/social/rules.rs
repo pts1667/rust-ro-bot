@@ -57,7 +57,18 @@ pub fn plausible(ask: &Ask, text: &str) -> bool {
     let starts = |keys: &[&str]| words.iter().any(|w| keys.iter().any(|k| w.starts_with(k)));
     match ask {
         Ask::Help(HelpTask::Follow) => {
-            starts(&["follow", "come", "walk", "escort"]) || lower.contains("with me")
+            // "I'll follow you" says the speaker comes along, which asks nothing of the bot
+            let speaker_follows = [
+                "follow you",
+                "following you",
+                "behind you",
+                "i'll follow",
+                "i will follow",
+            ]
+            .iter()
+            .any(|k| lower.contains(k));
+            !speaker_follows
+                && (starts(&["follow", "come", "walk", "escort"]) || lower.contains("with me"))
         }
         Ask::Help(HelpTask::Invite) | Ask::Help(HelpTask::JoinParty) => {
             starts(&["invit", "inv", "join", "party", "group"])
@@ -126,6 +137,11 @@ mod tests {
         assert!(!plausible(
             &Ask::Help(HelpTask::Follow),
             "nice weather today"
+        ));
+        assert!(!plausible(&Ask::Help(HelpTask::Follow), "I'll follow you"));
+        assert!(!plausible(
+            &Ask::Help(HelpTask::Follow),
+            "ok, right behind you"
         ));
         assert!(plausible(&Ask::Help(HelpTask::JoinParty), "wanna pt?"));
         assert!(plausible(

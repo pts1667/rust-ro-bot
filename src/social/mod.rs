@@ -646,7 +646,9 @@ impl Bot {
                 (true, _) => agree_text(&r.ask),
                 (false, Some(why)) => format!(
                     "sorry, can't: {}",
-                    why.replace("you ", "I ").replace("your ", "my ")
+                    why.replace("you are ", "I'm ")
+                        .replace("you ", "I ")
+                        .replace("your ", "my ")
                 ),
                 (false, None) => format!("sorry, can't right now ({doing})"),
             });

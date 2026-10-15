@@ -22,7 +22,38 @@ pub struct Edge {
     /// inside one map (the floors of a tower) goes from one part to another.
     pub from_region: Option<u32>,
     pub to_region: Option<u32>,
+    /// Not a warp but an NPC of `from` (its name in the reference, at `x`, `y`) that sends the bot on when asked
+    /// (`NPC_WAYS`). Only a way out for a bot already there: routes do not cross a map by it.
+    pub npc: Option<String>,
 }
+
+/// An NPC that sends anyone who asks to another map, and the menu entries that ask, in the order they come.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NpcWay {
+    /// The start of its name.
+    pub npc: &'static str,
+    pub to: &'static str,
+    pub keywords: &'static [&'static str],
+}
+
+/// The NPC ways the bot knows to ask for. moc_fild20 has no warp out, only a Continental Guard at every landing, who
+/// tells commoners to go and offers to send them to Morocc's camp.
+pub const NPC_WAYS: &[NpcWay] = &[NpcWay {
+    npc: "Continental Guard",
+    to: "morocc",
+    keywords: &["ask what happened", "ask about guard", "please do"],
+}];
+
+/// The NPC way of `npc` (a name of the reference or of an observation) to `to`.
+pub fn npc_way(npc: &str, to: &str) -> Option<&'static NpcWay> {
+    NPC_WAYS
+        .iter()
+        .find(|w| w.to == to && npc.starts_with(w.npc))
+}
+
+/// A transport NPC this near where a warp lands stands guard there: the way back is the NPC, not a warp next to the
+/// landing. Every landing on moc_fild20 has a Continental Guard 0 to 7 cells away.
+const GUARD_REACH: u16 = 10;
 
 impl Edge {
     /// `from:x,y>to`, the key of a warp in the bad-warp list.
@@ -106,6 +137,7 @@ impl WorldGraph {
                 guessed: false,
                 from_region: w.region,
                 to_region: w.to.region,
+                npc: None,
             })
             .collect();
         // A warp that lands on a warp of the map it leads to goes on at once: prt_castle's way to prt_gld lands in
@@ -124,15 +156,22 @@ impl WorldGraph {
                 edge.to_region = next.to.region;
             }
         }
-        // Some maps list no warps of their own (moc_fild20), only the warps that land on them. Warps come in pairs,
-        // so the way back is next to where a warp lands; travel then takes the real warp from the observation.
+        // Warps come in pairs, so a map that lists no way back to where a warp came from has one next to where it
+        // lands; travel then takes the real warp from the observation.
         for a in &data.arrivals {
             let to = a.from.map.id_str();
             // No guess where the map has a warp there of its own, even one left out as hidden by a bigger warp
             // Nor where an NPC with a condition is the way there: the Culvert Guardian on prt_fild05 lets in only
             // those who took up the Culvert quest
+            // Nor where an NPC that sends players away stands at the landing: moc_fild20 has guards and no warps.
+            // Its 13 guessed ways out made it a crossing between 10 maps, and bots went through a level 80 field.
+            let guarded = data.transports.iter().any(|t| {
+                t.x.abs_diff(a.land.x).max(t.y.abs_diff(a.land.y)) <= GUARD_REACH
+                    && (t.region.is_none() || a.land.region.is_none() || t.region == a.land.region)
+            });
             if to.is_empty()
                 || to == map
+                || guarded
                 || data.warps.iter().any(|w| w.to.map.id_str() == to)
                 || edges.iter().any(|e| e.to == to)
                 || data.transports.iter().any(|t| t.gates(&to))
@@ -149,7 +188,28 @@ impl WorldGraph {
                 guessed: true,
                 from_region: a.land.region,
                 to_region: a.from.region,
+                npc: None,
             });
+        }
+        // The NPCs the bot knows to ask for a way
+        for t in &data.transports {
+            for (to, to_x, to_y, to_region) in t.destinations() {
+                if npc_way(&t.npc.name, &to).is_none() {
+                    continue;
+                }
+                edges.push(Edge {
+                    from: map.to_owned(),
+                    x: t.x,
+                    y: t.y,
+                    to,
+                    to_x,
+                    to_y,
+                    guessed: false,
+                    from_region: t.region,
+                    to_region,
+                    npc: Some(t.npc.name.clone()),
+                });
+            }
         }
         Ok(edges)
     }
@@ -211,6 +271,7 @@ impl WorldGraph {
                 let next: Node = (edge.to.clone(), edge.to_region);
                 let inner = edge.to == edge.from;
                 if !edge.usable_from(node.1)
+                    || (edge.npc.is_some() && node != start)
                     || seen.contains(&next)
                     || (inner && edge.to_region.is_none())
                     || (avoid.contains(&edge.to) && edge.to != to && edge.to != from && !inner)
@@ -288,10 +349,11 @@ impl WorldGraph {
             let Ok(edges) = self.edges(&node.0).await else {
                 continue;
             };
-            for edge in edges
-                .into_iter()
-                .filter(|e| e.usable_from(node.1) && (e.to != e.from || e.to_region.is_some()))
-            {
+            for edge in edges.into_iter().filter(|e| {
+                e.usable_from(node.1)
+                    && e.npc.is_none()
+                    && (e.to != e.from || e.to_region.is_some())
+            }) {
                 let next: Node = (edge.to, edge.to_region);
                 if !dist.contains_key(&next) {
                     dist.insert(next.clone(), d + 1);
@@ -372,6 +434,65 @@ mod tests {
             std::fs::write(dir.join(format!("db_maps_{name}.json")), data.to_string()).unwrap();
         }
         WorldGraph::new(Db::new("http://127.0.0.1:9", Some(dir)).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_map_guarded_at_its_landings_is_left_by_asking_and_never_crossed() {
+        // As moc_fild20: warps land there from the town and the desert, and a guard at the landing sends players to
+        // the town when asked. The guessed ways back made it the short way from the desert to the town.
+        let tag = "guarded";
+        let g = cache(
+            &[
+                (
+                    "morocc",
+                    vec![warp(10, 1, "gorge", 1), warp(20, 1, "field", 1)],
+                ),
+                (
+                    "field",
+                    vec![warp(30, 1, "morocc", 1), warp(31, 1, "oasis", 1)],
+                ),
+                (
+                    "oasis",
+                    vec![warp(40, 1, "field", 1), warp(41, 1, "desert", 1)],
+                ),
+                (
+                    "desert",
+                    vec![warp(50, 1, "oasis", 1), warp(51, 1, "gorge", 1)],
+                ),
+                ("gorge", vec![]),
+            ],
+            tag,
+        );
+        let file = std::env::temp_dir()
+            .join(format!("rro-graph-{tag}-{}", std::process::id()))
+            .join("db_maps_gorge.json");
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        data["transports"] = json!([
+            {"npc": {"id": "gorge/Continental Guard#01", "name": "Continental Guard#01"}, "x": 4, "y": 96,
+             "checks": ["item", "variable"],
+             "to": [{"map": {"id": "morocc"}, "x": 160, "y": 61}, {"map": {"id": "beyond"}, "x": 1, "y": 1}]},
+            {"npc": {"id": "gorge/Rift Guard#1", "name": "Rift Guard#1"}, "x": 1, "y": 99, "checks": ["variable"],
+             "to": [{"map": {"id": "desert"}, "x": 1, "y": 1}]}
+        ]);
+        std::fs::write(&file, data.to_string()).unwrap();
+        let out = g.edges("gorge").await.unwrap();
+        assert_eq!(out.len(), 1, "only the guard's way to the town: {out:?}");
+        assert_eq!((out[0].to.as_str(), out[0].x, out[0].y), ("morocc", 4, 96));
+        assert_eq!(out[0].npc.as_deref(), Some("Continental Guard#01"));
+        let none = HashSet::new();
+        let maps = |r: Vec<Edge>| r.iter().map(|e| e.to.clone()).collect::<Vec<_>>();
+        let crossing = g.route("desert", "morocc", &none).await.unwrap().unwrap();
+        assert_eq!(maps(crossing), vec!["oasis", "field", "morocc"]);
+        let out_of_it = g.route("gorge", "field", &none).await.unwrap().unwrap();
+        assert_eq!(maps(out_of_it), vec!["morocc", "field"]);
+        assert!(
+            g.neighbourhood("desert", 3)
+                .await
+                .unwrap()
+                .iter()
+                .all(|(m, d)| m != "morocc" || *d == 3)
+        );
     }
 
     #[tokio::test]
