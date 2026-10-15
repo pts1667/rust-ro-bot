@@ -6,6 +6,7 @@ pub mod db;
 pub mod gear;
 pub mod graph;
 pub mod grounds;
+pub mod talks;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

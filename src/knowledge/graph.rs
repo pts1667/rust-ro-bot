@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 
 use super::db::{Db, MapWarp};
+use super::talks::{self, Talk};
 
 /// One warp: stepping on (`x`, `y`) of `from` lands on (`to_x`, `to_y`) of `to`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -22,38 +23,16 @@ pub struct Edge {
     /// inside one map (the floors of a tower) goes from one part to another.
     pub from_region: Option<u32>,
     pub to_region: Option<u32>,
-    /// Not a warp but an NPC of `from` (its name in the reference, at `x`, `y`) that sends the bot on when asked
-    /// (`NPC_WAYS`). Only a way out for a bot already there: routes do not cross a map by it.
-    pub npc: Option<String>,
-}
-
-/// An NPC that sends anyone who asks to another map, and the menu entries that ask, in the order they come.
-#[derive(Debug, PartialEq, Eq)]
-pub struct NpcWay {
-    /// The start of its name.
-    pub npc: &'static str,
-    pub to: &'static str,
-    pub keywords: &'static [&'static str],
-}
-
-/// The NPC ways the bot knows to ask for. moc_fild20 has no warp out, only a Continental Guard at every landing, who
-/// tells commoners to go and offers to send them to Morocc's camp.
-pub const NPC_WAYS: &[NpcWay] = &[NpcWay {
-    npc: "Continental Guard",
-    to: "morocc",
-    keywords: &["ask what happened", "ask about guard", "please do"],
-}];
-
-/// The NPC way of `npc` (a name of the reference or of an observation) to `to`.
-pub fn npc_way(npc: &str, to: &str) -> Option<&'static NpcWay> {
-    NPC_WAYS
-        .iter()
-        .find(|w| w.to == to && npc.starts_with(w.npc))
+    /// Not a warp but an NPC of `from` at `x`, `y` that sends the bot on when asked: a guard, a Kafra.
+    pub talk: Option<Talk>,
 }
 
 /// A transport NPC this near where a warp lands stands guard there: the way back is the NPC, not a warp next to the
 /// landing. Every landing on moc_fild20 has a Continental Guard 0 to 7 cells away.
 const GUARD_REACH: u16 = 10;
+
+/// Warps a paid way must save over the free one to be taken: the bot's zeny buys its potions.
+pub const FARE_SAVES: usize = 5;
 
 impl Edge {
     /// `from:x,y>to`, the key of a warp in the bad-warp list.
@@ -137,7 +116,7 @@ impl WorldGraph {
                 guessed: false,
                 from_region: w.region,
                 to_region: w.to.region,
-                npc: None,
+                talk: None,
             })
             .collect();
         // A warp that lands on a warp of the map it leads to goes on at once: prt_castle's way to prt_gld lands in
@@ -188,15 +167,15 @@ impl WorldGraph {
                 guessed: true,
                 from_region: a.land.region,
                 to_region: a.from.region,
-                npc: None,
+                talk: None,
             });
         }
         // The NPCs the bot knows to ask for a way
         for t in &data.transports {
             for (to, to_x, to_y, to_region) in t.destinations() {
-                if npc_way(&t.npc.name, &to).is_none() {
+                let Some(talk) = talks::npc_way(&t.npc.name, &to) else {
                     continue;
-                }
+                };
                 edges.push(Edge {
                     from: map.to_owned(),
                     x: t.x,
@@ -207,9 +186,23 @@ impl WorldGraph {
                     guessed: false,
                     from_region: t.region,
                     to_region,
-                    npc: Some(t.npc.name.clone()),
+                    talk: Some(talk),
                 });
             }
+        }
+        for (x, y, region, to, to_x, to_y, talk) in talks::kafra_teleports(&data) {
+            edges.push(Edge {
+                from: map.to_owned(),
+                x,
+                y,
+                to: to.to_owned(),
+                to_x,
+                to_y,
+                guessed: false,
+                from_region: region,
+                to_region: None,
+                talk: Some(talk),
+            });
         }
         Ok(edges)
     }
@@ -236,11 +229,39 @@ impl WorldGraph {
         avoid: &HashSet<String>,
         skip: &HashSet<String>,
     ) -> Result<Option<Vec<Edge>>> {
-        self.route_into(from, region, to, None, avoid, skip).await
+        self.route_into(from, region, to, None, avoid, skip, 0)
+            .await
+    }
+
+    /// `route_skipping` for a bot with `zeny`: a Kafra teleport where nothing else leads there, or where it saves
+    /// `FARE_SAVES` warps or more.
+    pub async fn route_paying(
+        &self,
+        from: &str,
+        region: Option<u32>,
+        to: &str,
+        avoid: &HashSet<String>,
+        skip: &HashSet<String>,
+        zeny: u64,
+    ) -> Result<Option<Vec<Edge>>> {
+        let free = self
+            .route_into(from, region, to, None, avoid, skip, 0)
+            .await?;
+        if zeny == 0 {
+            return Ok(free);
+        }
+        let paid = self
+            .route_into(from, region, to, None, avoid, skip, zeny)
+            .await?;
+        Ok(match (free, paid) {
+            (Some(free), Some(paid)) if free.len() >= paid.len() + FARE_SAVES => Some(paid),
+            (None, paid) => paid,
+            (free, _) => free,
+        })
     }
 
     /// `route_skipping` into the part `to_region` of `to` (any part for `None`): a room of an interior map the bot
-    /// gets to only through another door of the town outside.
+    /// gets to only through another door of the town outside. Paid ways cost `budget` zeny at most each.
     pub async fn route_into(
         &self,
         from: &str,
@@ -249,6 +270,7 @@ impl WorldGraph {
         to_region: Option<u32>,
         avoid: &HashSet<String>,
         skip: &HashSet<String>,
+        budget: u64,
     ) -> Result<Option<Vec<Edge>>> {
         let arrived = |map: &str, part: Option<u32>| {
             map == to && (to_region.is_none() || part.is_none() || part == to_region)
@@ -270,8 +292,12 @@ impl WorldGraph {
             for edge in edges {
                 let next: Node = (edge.to.clone(), edge.to_region);
                 let inner = edge.to == edge.from;
+                let talk_ok = edge
+                    .talk
+                    .as_ref()
+                    .is_none_or(|t| t.fare <= budget && (t.through || node == start));
                 if !edge.usable_from(node.1)
-                    || (edge.npc.is_some() && node != start)
+                    || !talk_ok
                     || seen.contains(&next)
                     || (inner && edge.to_region.is_none())
                     || (avoid.contains(&edge.to) && edge.to != to && edge.to != from && !inner)
@@ -351,7 +377,7 @@ impl WorldGraph {
             };
             for edge in edges.into_iter().filter(|e| {
                 e.usable_from(node.1)
-                    && e.npc.is_none()
+                    && e.talk.is_none()
                     && (e.to != e.from || e.to_region.is_some())
             }) {
                 let next: Node = (edge.to, edge.to_region);
@@ -479,7 +505,10 @@ mod tests {
         let out = g.edges("gorge").await.unwrap();
         assert_eq!(out.len(), 1, "only the guard's way to the town: {out:?}");
         assert_eq!((out[0].to.as_str(), out[0].x, out[0].y), ("morocc", 4, 96));
-        assert_eq!(out[0].npc.as_deref(), Some("Continental Guard#01"));
+        assert_eq!(
+            out[0].talk.as_ref().map(|t| t.npc.as_str()),
+            Some("Continental Guard#01")
+        );
         let none = HashSet::new();
         let maps = |r: Vec<Edge>| r.iter().map(|e| e.to.clone()).collect::<Vec<_>>();
         let crossing = g.route("desert", "morocc", &none).await.unwrap().unwrap();
@@ -493,6 +522,53 @@ mod tests {
                 .iter()
                 .all(|(m, d)| m != "morocc" || *d == 3)
         );
+    }
+
+    #[tokio::test]
+    async fn a_kafra_is_paid_only_where_walking_does_not_lead_or_is_much_longer() {
+        let tag = "kafra";
+        let mut maps = vec![
+            ("morocc", vec![warp(10, 1, "desert", 1)]),
+            ("desert", vec![warp(20, 1, "morocc", 1)]),
+            ("prontera", vec![warp(30, 1, "field", 1)]),
+            ("field", vec![warp(40, 1, "prontera", 1)]),
+        ];
+        let g = cache(&maps, tag);
+        let dir = std::env::temp_dir().join(format!("rro-graph-{tag}-{}", std::process::id()));
+        let file = dir.join("db_maps_morocc.json");
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        data["npcs"] = json!([
+            {"npc": {"id": "morocc/Kafra Employee#m", "name": "Kafra Employee#m"}, "x": 156, "y": 97},
+            {"npc": {"id": "morocc/Kafra Voting Staff#m", "name": "Kafra Voting Staff#m"}, "x": 150, "y": 90}
+        ]);
+        std::fs::write(&file, data.to_string()).unwrap();
+        let none = HashSet::new();
+        let route = |zeny| {
+            let g = g.clone();
+            let none = none.clone();
+            async move {
+                g.route_paying("morocc", None, "prontera", &none, &none, zeny)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(route(0).await.is_none());
+        assert!(route(1199).await.is_none(), "the fare to Prontera is 1200");
+        let paid = route(5000).await.unwrap();
+        assert_eq!(paid.len(), 1);
+        let talk = paid[0].talk.as_ref().unwrap();
+        assert_eq!((paid[0].x, paid[0].y, talk.fare), (156, 97, 1200));
+        assert_eq!(talk.keywords, vec!["use teleport service", "prontera ->"]);
+        // Walking there in two warps: the zeny is kept
+        maps[1].1.push(warp(21, 1, "field", 1));
+        let g = cache(&maps, "kafra2");
+        let walk = g
+            .route_paying("desert", None, "prontera", &none, &none, 5000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(walk.iter().all(|e| e.talk.is_none()), "{walk:?}");
     }
 
     #[tokio::test]
@@ -678,6 +754,7 @@ mod tests {
                 Some(9),
                 &HashSet::new(),
                 &HashSet::new(),
+                0,
             )
             .await
             .unwrap();
@@ -690,6 +767,7 @@ mod tests {
                 Some(9),
                 &HashSet::new(),
                 &HashSet::new(),
+                0,
             )
             .await
             .unwrap()

@@ -13,8 +13,9 @@ use crate::api::observation::Warp;
 use crate::api::{Action, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::state::HP_LOW;
-use crate::knowledge::graph::{Edge, npc_way};
+use crate::knowledge::graph::Edge;
 use crate::knowledge::grounds::lethal_monster;
+use crate::knowledge::talks::shown_name;
 
 /// Most warps one trip takes before giving up.
 const MAX_LEGS: usize = 30;
@@ -56,8 +57,11 @@ pub const GO_TOWNS: &[&str] = &[
     "veins",
     "moscovia",
 ];
-/// How near the bot walks to an NPC way it cannot see yet, before looking for the NPC again.
+/// How near the spot of an NPC way the NPC asked stands: the NPCs of a way are spots apart.
 const NPC_NEAR: u32 = 5;
+/// An NPC way out of the map the bot is on (a guard, not a town's Kafra) further than this is left out: the walk to
+/// it crosses the map, and moc_fild20 is a level 80 field with a guard at every landing.
+const NPC_FAR: u32 = 40;
 /// Maps around the destination searched for a town to `@go` to.
 const GO_SEARCH_HOPS: u32 = 6;
 /// Start of the failure reason of a warp in another part of the map (another room of an interior map).
@@ -172,7 +176,7 @@ impl Bot {
             .edges(here)
             .await?
             .into_iter()
-            .filter(|e| e.to == target && !skip.contains(&e.key()))
+            .filter(|e| e.to == target && e.talk.is_none() && !skip.contains(&e.key()))
             .collect();
         if let Ok(data) = self.knowledge.db.map(target).await {
             let region = data
@@ -223,6 +227,7 @@ impl Bot {
                     Some(region),
                     &avoid,
                     &skip,
+                    0,
                 )
                 .await?;
             let Some(edge) = route.as_ref().and_then(|r| r.first()) else {
@@ -364,13 +369,29 @@ impl Bot {
                 }
             }
             let avoid: HashSet<String> = self.memory.strategy.avoid_maps.iter().cloned().collect();
+            // A guard's way across the map is no way for this trip
+            let mut leg_skip = skip.clone();
+            for e in self.knowledge.graph.edges(&here).await? {
+                if e.talk.as_ref().is_some_and(|t| !t.through)
+                    && dist(obs.pos(), (e.x, e.y)) > NPC_FAR
+                {
+                    leg_skip.insert(e.key());
+                }
+            }
             let mut route = None;
             for _ in 0..5 {
                 let around: HashSet<String> = avoid.union(&deadly).cloned().collect();
                 let Some(r) = self
                     .knowledge
                     .graph
-                    .route_skipping(&here, obs.me.region, target, &around, &skip)
+                    .route_paying(
+                        &here,
+                        obs.me.region,
+                        target,
+                        &around,
+                        &leg_skip,
+                        obs.me.zeny,
+                    )
                     .await?
                 else {
                     break;
@@ -397,7 +418,7 @@ impl Bot {
                 route = self
                     .knowledge
                     .graph
-                    .route_skipping(&here, obs.me.region, target, &avoid, &skip)
+                    .route_paying(&here, obs.me.region, target, &avoid, &leg_skip, obs.me.zeny)
                     .await?;
             }
             let Some(mut route) = route else {
@@ -468,8 +489,8 @@ impl Bot {
     /// Steps on the warp of `edge`, from the map the bot is on, around the warps it stepped on by mistake before. A
     /// walk that ends on another map than the edge's is a failure: the warp it crossed is kept, to go around it.
     async fn take_warp(&mut self, obs: &Observation, edge: &Edge) -> Result<Outcome> {
-        if edge.npc.is_some() {
-            return self.ask_npc_way(edge).await;
+        if edge.talk.is_some() {
+            return self.ask_way(edge).await;
         }
         let from = obs.map.name.clone();
         if edge.to != from
@@ -638,45 +659,48 @@ impl Bot {
         )))
     }
 
-    /// Asks the NPC of `edge` to send the bot on (`NPC_WAYS`): the nearest NPC of that kind on the map, walked to when
-    /// out of sight. One that does not send the bot is no way from then on.
-    async fn ask_npc_way(&mut self, edge: &Edge) -> Result<Outcome> {
-        let Some(way) = edge.npc.as_deref().and_then(|n| npc_way(n, &edge.to)) else {
-            return Ok(Outcome::failed(format!("no known talk to {}", edge.to)));
+    /// Asks the NPC of `edge` to send the bot on (a guard, a Kafra): the nearest NPC of that way, walked to when out of
+    /// sight. One that does not send the bot is no way from then on, unless it was for want of zeny.
+    async fn ask_way(&mut self, edge: &Edge) -> Result<Outcome> {
+        let Some(talk) = edge.talk.clone() else {
+            return Ok(Outcome::failed(format!("no talk to {}", edge.to)));
         };
         let from = edge.from.clone();
+        let kind = talk.names.first().cloned().unwrap_or_default();
+        // Observations show no hidden `#` part: the guard of the way is the one standing at its spot
+        let of_kind = |name: &str| talk.names.iter().any(|n| shown_name(n) == shown_name(name));
         let fail = |bot: &mut Bot, reason: String| {
             if !bot.memory.bad_warps.contains(&edge.key()) {
                 bot.memory.bad_warps.push(edge.key());
                 bot.memory.note(format!(
                     "the {} on {from} does not send me to {}",
-                    way.npc, edge.to
+                    talk.npc, edge.to
                 ));
             }
             bot.knowledge.graph.forbid([edge.key()]);
             Outcome::failed(reason)
         };
         let mut obs = self.observe().await?;
-        // The nearest of its kind: there is one at every landing on moc_fild20
+        // The nearest of its kind: there is a guard at every landing on moc_fild20, and a town has several Kafras
         let spot = self
             .knowledge
             .graph
             .edges(&from)
             .await?
             .into_iter()
-            .filter(|e| e.to == edge.to && e.npc.as_deref().is_some_and(|n| n.starts_with(way.npc)))
+            .filter(|e| e.to == edge.to && e.talk.as_ref().is_some_and(|t| t.names == talk.names))
             .map(|e| (e.x, e.y))
             .min_by_key(|s| dist(*s, obs.pos()))
             .unwrap_or((edge.x, edge.y));
         let seen = |obs: &Observation| {
             obs.npcs
                 .iter()
-                .filter(|n| n.name.starts_with(way.npc))
-                .min_by_key(|n| dist((n.x, n.y), obs.pos()))
+                .filter(|n| of_kind(&n.name) && dist((n.x, n.y), spot) <= NPC_NEAR)
+                .min_by_key(|n| dist((n.x, n.y), spot))
                 .map(|n| n.id)
         };
-        if seen(&obs).is_none() && dist(obs.pos(), spot) > NPC_NEAR {
-            tracing::info!(on = %from, npc = way.npc, to = %edge.to, ?spot, "walking to an NPC way");
+        if seen(&obs).is_none() {
+            tracing::info!(on = %from, npc = %kind, to = %edge.to, ?spot, "walking to an NPC way");
             let (api, name) = (self.api.clone(), self.name.clone());
             let action = Action::Move {
                 x: spot.0,
@@ -691,8 +715,7 @@ impl Bot {
                 Walk::FightBack { target, name } => {
                     self.fight(target, &name).await?;
                     return Ok(Outcome::failed(format!(
-                        "fought {name} on the way to the {}",
-                        way.npc
+                        "fought {name} on the way to the {kind}"
                     )));
                 }
                 Walk::Ended(_) => {}
@@ -700,23 +723,27 @@ impl Bot {
             obs = self.observe().await?;
         }
         let Some(npc) = seen(&obs) else {
-            return Ok(fail(self, format!("no {} in sight on {from}", way.npc)));
+            return Ok(fail(
+                self,
+                format!("no {kind} in sight at {spot:?} on {from}"),
+            ));
         };
-        tracing::info!(on = %from, npc = way.npc, to = %edge.to, "asking an NPC for the way");
+        tracing::info!(on = %from, npc = %kind, to = %edge.to, fare = talk.fare, "asking an NPC for the way");
         let result = match self.act(Action::Use { target: npc }).await {
             Ok(r) => r,
             Err(error) => {
                 return Ok(Outcome::failed(format!(
-                    "could not talk to the {}: {error}",
-                    way.npc
+                    "could not talk to the {kind}: {error}"
                 )));
             }
         };
         let intent = Intent {
             goal: format!("Be sent to {}", edge.to),
-            keywords: way.keywords.iter().map(|k| (*k).to_owned()).collect(),
+            keywords: talk.keywords.clone(),
+            strict: true,
             ..Default::default()
         };
+        let zeny = obs.me.zeny;
         let end = self.run_dialog(dialog_of(&result), &intent).await?;
         // The script warps the bot a moment after the dialogue closes.
         for _ in 0..10 {
@@ -725,7 +752,14 @@ impl Bot {
                 if obs.dialog.is_some() {
                     self.act(Action::DialogClose).await.ok();
                 }
-                tracing::info!(from = %from, to = %obs.map.name, npc = way.npc, "an NPC sent the bot on");
+                let paid = zeny.saturating_sub(obs.me.zeny);
+                tracing::info!(from = %from, to = %obs.map.name, npc = %kind, paid, "an NPC sent the bot on");
+                if paid > 0 {
+                    self.memory.note(format!(
+                        "paid the {kind} on {from} {paid} zeny to go to {}",
+                        obs.map.name
+                    ));
+                }
                 return Ok(Outcome::Done);
             }
             Bot::pause(300).await;
@@ -733,13 +767,15 @@ impl Bot {
         if self.observe().await?.dialog.is_some() {
             self.act(Action::DialogClose).await.ok();
         }
-        Ok(fail(
-            self,
-            format!(
-                "the {} on {from} did not send the bot to {} ({end:?})",
-                way.npc, edge.to
-            ),
-        ))
+        let reason = format!(
+            "the {kind} on {from} did not send the bot to {} ({end:?})",
+            edge.to
+        );
+        // Too poor this time, not no way
+        if self.last_dialog.iter().any(|l| l.contains("enough zeny")) {
+            return Ok(Outcome::failed(reason));
+        }
+        Ok(fail(self, reason))
     }
 
     /// Watches a walk until it ends, the map changes, the bot dies, or an attacker worth fighting shows up. Weaker

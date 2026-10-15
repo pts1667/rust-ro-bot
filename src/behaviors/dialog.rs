@@ -25,6 +25,9 @@ pub struct Intent {
     pub answers: Vec<(String, String)>,
     /// Menus ask to say back what the NPC said before the first one, line by line (a pledge to recite).
     pub recite: bool,
+    /// Only the entries of `keywords`: a menu without one ends the talk. A Kafra without the teleport service would
+    /// have the bot save its respawn point there instead.
+    pub strict: bool,
     /// Talking to an unknown NPC to see what it does: menus get the entries that ask for more (`curious_option`), a
     /// number prompt (an amount to pay or buy) ends the talk.
     pub curious: bool,
@@ -478,6 +481,26 @@ impl Bot {
                         curious_menus += 1;
                         since_menu = transcript.len();
                         tracing::info!(option, choice = %options[option as usize - 1], "curious dialog menu");
+                        match self.act(Action::DialogChoose { option }).await {
+                            Ok(result) => dialog = dialog_of(&result),
+                            Err(error) => {
+                                self.act(Action::DialogClose).await.ok();
+                                return Ok(DialogEnd::GaveUp(error.to_string()));
+                            }
+                        }
+                        continue;
+                    }
+                    if intent.strict {
+                        let Some(option) =
+                            match_option(&options, &intent.keywords).filter(|_| repeats == 0)
+                        else {
+                            self.act(Action::DialogClose).await?;
+                            return Ok(DialogEnd::GaveUp(format!(
+                                "no entry to pick in {options:?}"
+                            )));
+                        };
+                        since_menu = transcript.len();
+                        tracing::info!(option, choice = %options[option as usize - 1], "dialog menu");
                         match self.act(Action::DialogChoose { option }).await {
                             Ok(result) => dialog = dialog_of(&result),
                             Err(error) => {
