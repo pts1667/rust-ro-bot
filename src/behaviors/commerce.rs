@@ -144,6 +144,8 @@ impl Bot {
                 if self.memory.potion_shop.as_ref() == Some(shop) {
                     self.memory.potion_shop = None;
                 }
+                // Next to no shop now: the plan goes to the next one. Else it tried to buy here twice more and gave up.
+                self.near_shop = false;
                 return Ok(None);
             }
             Err(error) => return Err(error),

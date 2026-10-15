@@ -365,6 +365,10 @@ async fn tick(bot: &mut Bot, handle: &mut Handle, r: &mut Run, obs: Observation)
         hops: Vec::new(),
     };
     bot.travel_spot = goal.spot();
+    bot.exploring = match &goal {
+        Goal::Explore { map } => Some(map.clone()),
+        _ => None,
+    };
     ws.hunted = false;
     let Some(steps) = plan(&ws, &goal, &ctx) else {
         give_up(bot, handle, r, &goal, "no plan reaches it");

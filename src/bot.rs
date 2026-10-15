@@ -1,6 +1,6 @@
 //! The bot: its API handle, knowledge and memory, and the helpers the behaviours share.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -73,6 +73,16 @@ pub struct Bot {
     /// The warps walked to that the bot stepped off by mistake (`Edge::key`), and when: a trip avoids one stepped off
     /// twice within `STRAY_MEMORY`, however many trips it takes.
     pub stray_edges: Vec<(String, Instant)>,
+    /// The first menu of the last conversation.
+    pub first_menu: Vec<String>,
+    /// The map the current goal explores: the bot talks to the NPCs it does not know there.
+    pub exploring: Option<String>,
+    /// The bot is on its way after a party member: no stops to talk to NPCs on the way.
+    pub following: bool,
+    /// NPCs (`map:name`) the bot walked past without talking to them, this run: one roll each.
+    pub npcs_passed: HashSet<String>,
+    /// When the bot last talked to an NPC out of curiosity.
+    pub last_curious: Option<Instant>,
 }
 
 impl Bot {
@@ -131,6 +141,11 @@ impl Bot {
             last_dialog: Vec::new(),
             deadly_ways: Vec::new(),
             stray_edges: Vec::new(),
+            first_menu: Vec::new(),
+            exploring: None,
+            following: false,
+            npcs_passed: HashSet::new(),
+            last_curious: None,
         }
     }
 

@@ -74,7 +74,19 @@ voice/                    --voice llm (free text, the LLM strategist) or system-
 `leave_training` (the only option while on `new_*`), `job_change:<job>` (job level 10 for a first job, 40 for a second;
 only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warps, from `knowledge::grounds`, with the
 exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multiple of max HP), `rest`, and
-`explore:<map>` (up to 2 unvisited maps within 2 warps).
+`explore:<map>` (up to 2 unvisited maps within 2 warps, the insides of towns included).
+
+- Curiosity (`behaviors/curiosity.rs`): on a map it went to explore, the bot talks to up to 3 NPCs it does not know;
+  on the way anywhere, it stops for an unknown NPC within 12 cells with a 15% chance (one roll per NPC and run, 90 s
+  at least between stops, never while following a party member); entering a town, with a 10% chance it goes to one
+  unknown NPC anywhere in its part of the town. Where any will do (a town, a map explored), the decision model (or
+  the LLM) picks among the 10 nearest, shown with their distance and quest icon; without a voice, a quest icon wins,
+  else the nearest. One NPC per name a map (four Guards are one). An NPC the bot could not reach is left alone for
+  the run. Shops, Kafras, warpers and the NPCs of the written quests are known already. The talk asks to hear more (`curious_option`: entries like "Tell me about...", "Who are you?")
+  and leaves when an entry or the page speaks of money, gear, a job or a trip, or when asked for an amount. What it
+  did (sells things, started a quest, sent the bot somewhere, gave or took items or zeny, its first menu) goes to
+  `npcs_met` in the bot's memory and to the journal (`met <npc> on <map>: ...`); the forum shares those that did
+  more than talk or show a menu. The bot cannot follow a quest it discovers this way: only the written ones.
 
 - Hunting grounds count the warps of a way that crosses no deadly map (`safe_hops`: an aggressive monster with 5 or
   more spawns that kills the bot in two hits), and a ground with no such way is not offered. mjo_dun01 used to show

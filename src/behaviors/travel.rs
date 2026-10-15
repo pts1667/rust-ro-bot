@@ -7,6 +7,7 @@ use anyhow::Result;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
+use super::curiosity::{Curiosity, EXPLORE_TALKS, TOWN_CHANCE};
 use super::dialog::{DialogEnd, Intent, dialog_of};
 use crate::api::observation::Warp;
 use crate::api::{Action, Observation, dist};
@@ -323,12 +324,34 @@ impl Bot {
         }
         let mut strays = 0;
         let fighter = self.knowledge.fighter(&self.observe().await?).await?;
+        // NPCs talked to on the map the goal explores, and the map of the last leg: a town entered gets a roll.
+        let mut explore_talks = 0;
+        let mut last_map: Option<String> = None;
         for _ in 0..MAX_LEGS {
             if self.preempted() {
                 return Ok(Outcome::Preempted);
             }
             let obs = self.observe().await?;
             let here = obs.map.name.clone();
+            // Unknown NPCs: a few on the map the goal explores, now and then one in a town entered or near the way
+            let entered = last_map.as_deref().is_some_and(|m| m != here);
+            last_map = Some(here.clone());
+            let why = if here == target
+                && self.exploring.as_deref() == Some(target)
+                && explore_talks < EXPLORE_TALKS
+            {
+                Some(Curiosity::Explore)
+            } else if entered && rand::random::<f64>() < TOWN_CHANCE && self.is_town(&here).await {
+                Some(Curiosity::Town)
+            } else {
+                (here != target).then_some(Curiosity::Near)
+            };
+            if let Some(why) = why
+                && self.curious(&obs, why).await?
+            {
+                explore_talks += usize::from(why == Curiosity::Explore);
+                continue;
+            }
             if here == target {
                 return Ok(Outcome::Done);
             }

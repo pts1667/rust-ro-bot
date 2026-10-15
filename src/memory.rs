@@ -55,11 +55,31 @@ pub struct Memory {
     pub journal: Vec<String>,
     /// Where the bot stands in each quest it took up.
     pub quests: crate::quests::QuestBook,
+    /// The NPCs the bot talked to out of curiosity, as `map:name`, and what came of it.
+    pub npcs_met: BTreeMap<String, NpcNote>,
     #[serde(skip)]
     path: PathBuf,
 }
 
 const JOURNAL_LEN: usize = 12;
+
+/// What talking to an NPC out of curiosity showed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NpcNote {
+    pub map: String,
+    pub name: String,
+    pub x: u16,
+    pub y: u16,
+    /// What it turned out to do, in a few words: "sells things", "started the quest ...", "sent me to ...", "talks".
+    pub does: String,
+    /// The first things it said, colour codes removed.
+    pub said: Vec<String>,
+    /// The entries of the first menu it showed.
+    pub menu: Vec<String>,
+    /// Unix seconds of the talk.
+    pub at: u64,
+}
 
 /// Fights with one monster since the bot was at `level`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

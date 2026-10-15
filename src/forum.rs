@@ -197,6 +197,18 @@ pub fn finding_of(line: &str) -> Option<Finding> {
             });
         }
     }
+    // An NPC met out of curiosity, when it did more than talk or show a menu
+    if let Some(rest) = line.strip_prefix("met ")
+        && let Some((npc, rest)) = rest.split_once(" on ")
+        && let Some((map, does)) = rest.split_once(": ")
+        && does != "talks"
+        && !does.starts_with("offers ")
+    {
+        return Some(Finding {
+            subject: npc.to_owned(),
+            ..finding("npc", &format!("{npc} on {map}"))
+        });
+    }
     if let Some(rest) = line.strip_prefix("reached base level ")
         && let Some((level, map)) = rest.split_once(" on ")
         && level.parse::<u32>().is_ok_and(|l| l % 5 == 0)
@@ -910,6 +922,21 @@ fn happened(snap: &Snapshot, finding: &Finding) -> String {
             )
         }
         "hunt" => format!("{}: you hunted there to level up.", finding.line),
+        "npc" => format!(
+            "You talked to {} out of curiosity: it {}.",
+            finding
+                .line
+                .strip_prefix("met ")
+                .and_then(|l| l.split_once(": "))
+                .map_or(finding.subject.as_str(), |(who, _)| who),
+            finding
+                .line
+                .split_once(": ")
+                .map_or(String::new(), |(_, does)| format!(" {does} ")
+                    .replace(" me ", " you ")
+                    .trim()
+                    .to_owned())
+        ),
         "stuck" => format!(
             "{}. You could not finish that step and left the quest for a while.",
             finding.line

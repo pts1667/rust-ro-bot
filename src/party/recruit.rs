@@ -4,7 +4,8 @@
 //! enough to share experience), then takes the invitation that comes back. Finding none, a bot that can create a party
 //! does, and puts up its own ad; it invites whoever whispers it with a fitting level, until the party is full. Two lone
 //! leaders merge: the one with the newer ad gives its party up and asks the other. A member leaves when the leader has
-//! been out of the game for long, or their levels drifted too far apart to share experience.
+//! been out of the game for long, has been too far to follow for long, or their levels drifted too far apart to share
+//! experience.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -35,6 +36,10 @@ const CREATE_EVERY: Duration = Duration::from_secs(30);
 const REGISTER_EVERY: Duration = Duration::from_secs(60);
 /// A leader out of the game this long is given up.
 const LEADER_GONE: Duration = Duration::from_secs(600);
+/// A leader too far or too dangerous to follow this long is given up, and its ads are not answered for `LEFT_FOR`.
+/// The board put bots in Rachel and in Prontera's fields, 22 warps apart, in one party: the members played alone.
+const LEADER_FAR: Duration = Duration::from_secs(600);
+const LEFT_FOR: Duration = Duration::from_secs(30 * 60);
 const BASIC_SKILL_TO_CREATE: u32 = 7;
 const PARTY_NAME_LEN: usize = 23;
 /// A bot nobody answers says it looks for a party or members this often, when someone is in sight to hear it.
@@ -53,6 +58,10 @@ pub struct Recruiting {
     last_create: Option<Instant>,
     create_tries: u32,
     leader_gone_since: Option<Instant>,
+    /// Since when the leader has been too far to follow.
+    leader_far_since: Option<Instant>,
+    /// The leaders the bot left for being too far, by lowercase name.
+    left: HashMap<String, Instant>,
     last_shout: Option<Instant>,
     /// Since when the bot leads a party of one.
     alone_since: Option<Instant>,
@@ -99,6 +108,7 @@ impl Recruiting {
             && (ad.jobs.is_empty() || ad.jobs.iter().any(|j| super::same_job(j, job)))
             && !Self::recently(&self.asked, &ad.name, ASK_AGAIN)
             && !Self::recently(&self.refused, &ad.name, ASK_AGAIN)
+            && !Self::recently(&self.left, &ad.name, LEFT_FOR)
     }
 
     /// The whispers since the last call, read as party chat.
@@ -427,7 +437,22 @@ impl Bot {
         let Some(leader) = leader_of(party) else {
             return Ok(false);
         };
+        // The last follow check was to where the leader is, and said no
+        let far = self.party.as_ref().is_some_and(|p| {
+            p.follow_check
+                .as_ref()
+                .is_some_and(|(map, _, ok)| !ok && *map == leader.map)
+        });
         let r = self.recruiting();
+        let far = if far {
+            r.leader_far_since
+                .get_or_insert_with(Instant::now)
+                .elapsed()
+                >= LEADER_FAR
+        } else {
+            r.leader_far_since = None;
+            false
+        };
         let gone = if leader.online {
             r.leader_gone_since = None;
             false
@@ -440,11 +465,14 @@ impl Bot {
         let apart = leader
             .base_level
             .is_some_and(|level| level.abs_diff(obs.me.base_level) > LEAVE_LEVEL_GAP);
-        if !gone && !apart {
+        if !gone && !apart && !far {
             return Ok(false);
         }
         let reason = if gone {
             "the leader is gone"
+        } else if far {
+            r.left.insert(leader.name.to_lowercase(), Instant::now());
+            "you are too far away"
         } else {
             "our levels are too far apart now"
         };
@@ -461,6 +489,7 @@ impl Bot {
 fn r_reset(bot: &mut Bot) {
     let r = bot.recruiting();
     r.leader_gone_since = None;
+    r.leader_far_since = None;
     r.last_search = None;
 }
 
@@ -489,6 +518,9 @@ mod tests {
         assert!(!r.fits(&ad(1, "Alfa", 12, &["Acolyte"]), "Bravo", 12, "Swordman"));
         r.asked.insert("alfa".into(), Instant::now());
         assert!(!r.fits(&ad(1, "Alfa", 15, &[]), "Bravo", 12, "Novice"));
+        // A leader left for being too far is not asked again for a while
+        r.left.insert("charlie".into(), Instant::now());
+        assert!(!r.fits(&ad(1, "Charlie", 12, &[]), "Bravo", 12, "Novice"));
     }
 
     #[test]

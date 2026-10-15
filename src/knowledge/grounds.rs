@@ -99,8 +99,13 @@ pub fn score_map(
 
 /// Rules out the training grounds, arenas, event and quest rooms, whose spawns are not for levelling.
 pub fn is_hunting_map_name(name: &str) -> bool {
-    const SKIP: [&str; 10] = [
-        "new_", "arena", "room", "quiz", "job_", "que_", "evt", "pvp", "gld", "_in",
+    !name.contains("_in") && is_explorable_map_name(name)
+}
+
+/// A map worth a visit to see it: the hunting maps and the insides of towns, not test, event, arena or guild maps.
+pub fn is_explorable_map_name(name: &str) -> bool {
+    const SKIP: [&str; 9] = [
+        "new_", "arena", "room", "quiz", "job_", "que_", "evt", "pvp", "gld",
     ];
     !SKIP.iter().any(|s| name.contains(s))
 }

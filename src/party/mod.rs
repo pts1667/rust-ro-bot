@@ -648,7 +648,20 @@ impl Bot {
         let deadly_there = lethal_monster(db, map, &fighter).await;
         let ok = hops.is_some_and(|h| h <= FOLLOW_HOPS) && deadly_there.is_none();
         if !ok {
-            tracing::info!(to = %map, ?hops, deadly = ?deadly_there, "too far or too dangerous to follow, playing alone meanwhile");
+            // No safe way (every way crosses a deadly map) and no way at all look the same in the hops: say which
+            let reachable = self
+                .knowledge
+                .graph
+                .route_skipping(
+                    &obs.map.name,
+                    obs.me.region,
+                    map,
+                    &std::collections::HashSet::new(),
+                    &std::collections::HashSet::new(),
+                )
+                .await?
+                .is_some();
+            tracing::info!(from = %obs.map.name, to = %map, ?hops, reachable, deadly = ?deadly_there, "too far or too dangerous to follow, playing alone meanwhile");
         }
         self.party.as_mut().expect("party play").follow_check =
             Some((map.to_owned(), Instant::now(), ok));
@@ -663,7 +676,10 @@ impl Bot {
         }
         if followed.map != obs.map.name {
             tracing::info!(to = %followed.map, member = %followed.name, "following to another map");
-            return self.travel(&followed.map).await;
+            self.following = true;
+            let outcome = self.travel(&followed.map).await;
+            self.following = false;
+            return outcome;
         }
         let Some(there) = followed.pos() else {
             Bot::pause(500).await;

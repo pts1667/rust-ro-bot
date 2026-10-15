@@ -17,6 +17,9 @@ use combat::Fighter;
 use db::Db;
 use graph::WorldGraph;
 
+/// Shops dropped for want of a safe way before the bot gives up on buying gear for now.
+const SAFE_SHOP_TRIES: usize = 5;
+
 /// Shared access to the reference data.
 #[derive(Clone)]
 pub struct Knowledge {
@@ -40,8 +43,9 @@ impl Knowledge {
         }
     }
 
-    /// The best piece of equipment the bot can buy for `budget` zeny, at a shop at most `max_hops` warps away, that
-    /// `next_job` can wear too.
+    /// The best piece of equipment the bot can buy for `budget` zeny, at a shop at most `max_hops` warps away on a way
+    /// that crosses no deadly map (`grounds::safe_hops`), that `next_job` can wear too. Counted by plain warps, shops in
+    /// Einbroch, Lighthalzen and Veins sent bots from Rachel through Drosera and Hill Wind: 9 deaths in 40 minutes.
     pub async fn best_upgrade(
         &self,
         obs: &Observation,
@@ -59,15 +63,39 @@ impl Knowledge {
                 c
             }
         };
-        let hops: HashMap<String, u32> = self
+        let mut hops: HashMap<String, u32> = self
             .graph
             .neighbourhood(&obs.map.name, max_hops)
             .await?
             .into_iter()
             .collect();
-        Ok(gear::best_upgrade(
-            &catalog, obs, budget, &hops, next_job, bad_shops,
-        ))
+        let fighter = self.fighter(obs).await?;
+        let mut lethal = HashMap::new();
+        // The best upgrade at a shop the bot can reach safely: shops on maps without such a way are left out, one at a time
+        for _ in 0..SAFE_SHOP_TRIES {
+            let Some(up) = gear::best_upgrade(&catalog, obs, budget, &hops, next_job, bad_shops)
+            else {
+                return Ok(None);
+            };
+            let map = up.shop.map.id_str();
+            let safe = grounds::safe_hops(
+                &self.db,
+                &self.graph,
+                &fighter,
+                &obs.map.name,
+                &map,
+                &Default::default(),
+                &mut lethal,
+            )
+            .await?;
+            match safe {
+                Some(h) if h <= max_hops => return Ok(Some(gear::Upgrade { hops: h, ..up })),
+                _ => {
+                    hops.remove(&map);
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Looks up the heal amount of the usable items in the inventory it has not seen yet.

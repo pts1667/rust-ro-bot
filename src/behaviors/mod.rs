@@ -2,6 +2,7 @@
 
 pub mod combat;
 pub mod commerce;
+pub mod curiosity;
 pub mod dialog;
 pub mod gear;
 pub mod progression;

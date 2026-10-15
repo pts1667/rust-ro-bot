@@ -16,7 +16,7 @@ use crate::goap::state::{HEAL_STOCK_MIN, HEAL_STOCK_WANTED, arrow_count, next_jo
 use crate::knowledge::Knowledge;
 use crate::knowledge::combat::Fighter;
 use crate::knowledge::gear::Slot;
-use crate::knowledge::grounds::{farm_ground, hunting_grounds, is_hunting_map_name};
+use crate::knowledge::grounds::{farm_ground, hunting_grounds, is_explorable_map_name};
 use crate::party::recruit::MAX_MEMBERS;
 use crate::party::support::SPARE_ABOVE;
 use crate::party::{SIGHT, same_job};
@@ -332,7 +332,9 @@ async fn game_options(
         });
     }
 
-    if snap.loot_items > 0 && !failed(&Goal::SellLoot) {
+    // Only with a potion shop known: without one the step can not start, and the model kept choosing it (every 7 minutes
+    // in one run, a bot at level 5 after 2.5 hours)
+    if snap.loot_items > 0 && snap.potion_price > 0 && !failed(&Goal::SellLoot) {
         out.push(opt(
             "sell_loot",
             Goal::SellLoot,
@@ -412,14 +414,14 @@ async fn game_options(
         }
     }
 
-    // A couple of unvisited maps nearby, for curiosity.
+    // A couple of unvisited maps nearby, the insides of towns too, for curiosity: the bot talks to the NPCs there.
     let mut explore = 0;
     for (map, hops) in knowledge.graph.neighbourhood(&ws.map, 2).await? {
         if explore >= 2
             || hops == 0
             || snap.visited.contains(&map)
             || avoid_maps.contains(&map)
-            || !is_hunting_map_name(&map)
+            || !is_explorable_map_name(&map)
         {
             continue;
         }

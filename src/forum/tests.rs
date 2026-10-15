@@ -37,6 +37,14 @@ fn findings_come_from_the_lines_worth_telling() {
     assert!(finding_of("reached base level 16 on prt_fild08").is_none());
     assert!(finding_of("reached base level 15 on prontera").is_none());
     assert!(finding_of("sold loot for 300 z, now 900 z").is_none());
+    let npc = finding_of("met Old Man on prt_in: started the quest The Lost Child").unwrap();
+    assert_eq!(
+        (npc.key.as_str(), npc.subject.as_str()),
+        ("npc:old man on prt_in", "Old Man")
+    );
+    // An NPC that only talked is no news
+    assert!(finding_of("met Old Man on prt_in: talks").is_none());
+    assert!(finding_of("met Dairenne on prontera: offers Talk, Cancel").is_none());
 }
 
 #[test]

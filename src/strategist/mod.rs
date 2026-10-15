@@ -347,7 +347,9 @@ async fn decide(
     if let Some(d) = decider {
         match d.learn(state, snap).await {
             Ok(lessons) => apply_lessons(state, &lessons, ""),
-            Err(error) => tracing::warn!(target: "strategist", %error, "no lessons"),
+            Err(error) => {
+                tracing::warn!(target: "strategist", error = %format!("{error:#}"), "no lessons")
+            }
         }
     }
     let options = build_options(snap, knowledge, state).await?;
@@ -415,7 +417,7 @@ async fn decide(
             }
             Err(error) => {
                 counters.llm_invalid += 1;
-                tracing::warn!(target: "strategist", %error, "decision step failed, using the fallback");
+                tracing::warn!(target: "strategist", error = %format!("{error:#}"), "decision step failed, using the fallback");
             }
         }
     }

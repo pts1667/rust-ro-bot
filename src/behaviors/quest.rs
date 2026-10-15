@@ -261,6 +261,7 @@ impl Bot {
                 .map(|(q, a)| ((*q).to_owned(), (*a).to_owned()))
                 .collect(),
             recite: talk.recite,
+            curious: false,
         };
         let mut said = Vec::new();
         for n in 0..talk.times.max(1) {

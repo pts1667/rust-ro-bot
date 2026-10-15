@@ -190,6 +190,54 @@ NPC says:
         }
     }
 
+    /// The NPC (index in `npcs`, their lines) a character exploring should talk to first, `situation` telling who and
+    /// where it is.
+    pub async fn npc_to_meet(&self, situation: &str, npcs: &[String]) -> Result<usize> {
+        if npcs.is_empty() {
+            bail!("no NPCs");
+        }
+        const ASK: &str = "Which NPC should the character talk to first, to discover a quest or something worth telling other players?";
+        let llm = match &self.voice {
+            Voice::Llm(llm) => llm,
+            Voice::SystemOne(s1) => {
+                let numbered = npcs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| ((i + 1).to_string(), n.clone()))
+                    .collect();
+                let pick = s1.choose(situation, ASK, numbered, 0.3).await?;
+                return pick
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .ok_or_else(|| anyhow::anyhow!("bad NPC {pick}"));
+            }
+        };
+        let numbered: Vec<String> = npcs
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{}. {n}", i + 1))
+            .collect();
+        let user = format!(
+            "{situation}\n\nNPCs it has not met:\n{}\n\n{ASK} Answer with its number.",
+            numbered.join("\n")
+        );
+        let ids: Vec<usize> = (1..=npcs.len()).collect();
+        let schema = json!({"type": "object", "properties": {"npc": {"type": "integer", "enum": ids}}, "required": ["npc"]});
+        let v = llm
+            .ask_json(
+                "You help a game character explore Ragnarok Online.",
+                &user,
+                schema,
+                30,
+            )
+            .await?;
+        match v.get("npc").and_then(Value::as_u64) {
+            Some(i) if i >= 1 && i as usize <= npcs.len() => Ok(i as usize - 1),
+            _ => bail!("bad NPC in {v}"),
+        }
+    }
+
     /// What `context.from` asks for in its last line, if anything, and what to answer. Without `asks`, only the
     /// answer: the request the model saw was not one.
     pub async fn chat(&self, context: &ChatContext, asks: bool) -> Result<ChatTurn> {
@@ -381,6 +429,34 @@ mod tests {
     fn a_question_whether_it_is_a_bot_is_seen() {
         assert!(asks_if_bot("hi elara, are you a bot?") && asks_if_bot("u human?"));
         assert!(!asks_if_bot("the bot of the forum said hi") && !asks_if_bot("about to go?"));
+    }
+
+    /// The NPCs the decision model would meet first: `cargo test npcs_on_the_decision -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn npcs_on_the_decision_model() {
+        let helper = Helper::new(Voice::SystemOne(
+            SystemOne::new("http://127.0.0.1:9931").unwrap(),
+        ));
+        let situation = "A level 18/12 Swordman in Ragnarok Online is on prontera and may talk to one NPC there it \
+has never met, to discover a quest, or news to tell other players.";
+        let npcs: Vec<String> = [
+            "Guard (12 cells away)",
+            "Tool Dealer (30 cells away)",
+            "Old Lady (45 cells away, a quest icon above it)",
+            "Bard (20 cells away)",
+            "Pub Master (60 cells away)",
+            "Sign (8 cells away)",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut picks = std::collections::BTreeMap::new();
+        for _ in 0..10 {
+            let i = helper.npc_to_meet(situation, &npcs).await.unwrap();
+            *picks.entry(npcs[i].clone()).or_insert(0) += 1;
+        }
+        println!("{picks:#?}");
     }
 
     /// Chat answers of the decision model: `cargo test chat_on_the_decision -- --ignored --nocapture`.

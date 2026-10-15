@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 /// A request that takes longer than this is dropped: an answer takes well under a second.
-const TIMEOUT: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(90);
 /// Most options the server takes in a choice.
 pub const MAX_OPTIONS: usize = 255;
 

@@ -25,6 +25,9 @@ pub struct Intent {
     pub answers: Vec<(String, String)>,
     /// Menus ask to say back what the NPC said before the first one, line by line (a pledge to recite).
     pub recite: bool,
+    /// Talking to an unknown NPC to see what it does: menus get the entries that ask for more (`curious_option`), a
+    /// number prompt (an amount to pay or buy) ends the talk.
+    pub curious: bool,
 }
 
 /// The entry that says the next line of what was heard (`heard[from..]`), and where the heard lines go on after it.
@@ -231,18 +234,123 @@ pub fn option_for(options: &[String], answer: &str) -> Option<u32> {
 
 /// The option that most likely ends the conversation without commitment.
 pub fn safe_option(options: &[String]) -> u32 {
+    exit_option(options).unwrap_or(options.len() as u32)
+}
+
+/// The entry (1-based) that says no or leaves, if one does.
+pub fn exit_option(options: &[String]) -> Option<u32> {
     const EXITS: [&str; 7] = ["cancel", "quit", "end", "no", "leave", "exit", "nothing"];
     EXITS
         .iter()
-        .find_map(|k| {
-            options.iter().position(|o| {
-                o.to_lowercase()
-                    .split(|c: char| !c.is_alphanumeric())
-                    .any(|w| w == *k)
-            })
-        })
+        .find_map(|k| options.iter().position(|o| has_word(o, k)))
         .map(|i| i as u32 + 1)
-        .unwrap_or(options.len() as u32)
+}
+
+/// Whether `text` holds the word or words `key`, whole.
+fn has_word(text: &str, key: &str) -> bool {
+    let words = |s: &str| {
+        let w: Vec<String> = s
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect();
+        format!(" {} ", w.join(" "))
+    };
+    words(text).contains(&words(key))
+}
+
+/// Words of an entry or of the page before a menu that commit the bot to something: money, gear, stats, a job, a
+/// trip, its items.
+const RISKY: [&str; 44] = [
+    "refine",
+    "upgrade",
+    "reset",
+    "job",
+    "become",
+    "change",
+    "warp",
+    "teleport",
+    "transport",
+    "move",
+    "go to",
+    "send",
+    "save",
+    "storage",
+    "buy",
+    "sell",
+    "purchase",
+    "exchange",
+    "trade",
+    "pay",
+    "zeny",
+    "z",
+    "donate",
+    "gamble",
+    "bet",
+    "lottery",
+    "card",
+    "enchant",
+    "socket",
+    "marry",
+    "wedding",
+    "divorce",
+    "rent",
+    "hire",
+    "register",
+    "guild",
+    "delete",
+    "repair",
+    "identify",
+    "appraise",
+    "fee",
+    "cost",
+    "price",
+    "give",
+];
+/// Words of an entry that asks to hear more.
+const CURIOUS: [&str; 24] = [
+    "quest",
+    "who",
+    "what",
+    "about",
+    "ask",
+    "talk",
+    "tell",
+    "story",
+    "hear",
+    "listen",
+    "information",
+    "info",
+    "explain",
+    "how",
+    "why",
+    "help",
+    "hello",
+    "hi",
+    "chat",
+    "rumor",
+    "rumour",
+    "news",
+    "sure",
+    "yes",
+];
+/// Menus answered in one curious talk before leaving.
+const CURIOUS_MENUS: usize = 3;
+
+/// The entry (1-based) a curious talk picks, `answered` menus in: one that asks to hear more, unless the page or the
+/// entry speaks of money, gear, a job or a trip; else the one that leaves. `None`: no entry leaves, close the talk.
+pub fn curious_option(page: &[String], options: &[String], answered: usize) -> Option<u32> {
+    let risky = |text: &str| RISKY.iter().any(|k| has_word(text, k));
+    if answered < CURIOUS_MENUS
+        && !risky(&page.join(" "))
+        && let Some(i) = options
+            .iter()
+            .position(|o| !risky(o) && CURIOUS.iter().any(|k| has_word(o, k)))
+    {
+        return Some(i as u32 + 1);
+    }
+    exit_option(options)
 }
 
 impl Bot {
@@ -260,7 +368,10 @@ impl Bot {
         // For a recitation: what was said before the first menu, and how far it was said back.
         let mut heard: Option<Vec<String>> = None;
         let mut recited = 0;
+        // Menus a curious talk answered.
+        let mut curious_menus = 0;
         self.last_dialog.clear();
+        self.first_menu.clear();
         for _ in 0..MAX_DIALOG_STEPS {
             let Some(d) = dialog.take() else {
                 let obs = self.observe().await?;
@@ -309,6 +420,10 @@ impl Bot {
                     tracing::info!(%text, "dialog text");
                     Action::DialogText { text }
                 }
+                "number" if intent.curious => {
+                    self.act(Action::DialogClose).await?;
+                    return Ok(DialogEnd::GaveUp("asked for an amount".into()));
+                }
                 "number" => {
                     let value = known
                         .and_then(|a| a.trim().parse::<i64>().ok())
@@ -329,12 +444,34 @@ impl Bot {
                         .as_ref()
                         .map(|p| p.options.clone())
                         .unwrap_or_default();
+                    if self.first_menu.is_empty() {
+                        self.first_menu = options.clone();
+                    }
                     let key = format!("{:?}{:?}", d.lines, options);
                     let repeats = seen_menus.iter().filter(|k| **k == key).count();
                     seen_menus.push(key);
                     if repeats >= 2 || options.is_empty() {
                         self.act(Action::DialogClose).await?;
                         return Ok(DialogEnd::GaveUp(format!("menu repeats: {options:?}")));
+                    }
+                    if intent.curious {
+                        let Some(option) =
+                            curious_option(&transcript[since_menu..], &options, curious_menus)
+                        else {
+                            self.act(Action::DialogClose).await?;
+                            return Ok(DialogEnd::GaveUp(format!("no way out of {options:?}")));
+                        };
+                        curious_menus += 1;
+                        since_menu = transcript.len();
+                        tracing::info!(option, choice = %options[option as usize - 1], "curious dialog menu");
+                        match self.act(Action::DialogChoose { option }).await {
+                            Ok(result) => dialog = dialog_of(&result),
+                            Err(error) => {
+                                self.act(Action::DialogClose).await.ok();
+                                return Ok(DialogEnd::GaveUp(error.to_string()));
+                            }
+                        }
+                        continue;
                     }
                     let heard = heard.get_or_insert_with(|| transcript.clone());
                     let recital = if intent.recite {
@@ -574,6 +711,53 @@ mod tests {
         assert_eq!(recite_next(&heard, 0, &options), Some((3, 3)));
         assert_eq!(recite_next(&heard, 3, &options), Some((2, 5)));
         assert_eq!(recite_next(&heard, 5, &options), Some((1, 6)));
+    }
+
+    #[test]
+    fn a_curious_talk_asks_for_more_but_commits_to_nothing() {
+        let page = |s: &str| vec![s.to_owned()];
+        let hello = page("Hello there, traveller.");
+        assert_eq!(
+            curious_option(&hello, &opts(&["Refine", "Tell me about it", "Cancel"]), 0),
+            Some(2)
+        );
+        // An entry to hear more that would also cost something is not taken
+        assert_eq!(
+            curious_option(&hello, &opts(&["Ask to warp", "Quit"]), 0),
+            Some(2)
+        );
+        // A page about money or a job: leave
+        assert_eq!(
+            curious_option(&page("It costs 500 zeny."), &opts(&["Yes", "No"]), 0),
+            Some(2)
+        );
+        assert_eq!(
+            curious_option(
+                &page("Do you want to become a Swordman?"),
+                &opts(&["Yes", "No"]),
+                0
+            ),
+            Some(2)
+        );
+        // Enough questions: leave
+        assert_eq!(
+            curious_option(&hello, &opts(&["Who are you?", "End"]), 3),
+            Some(2)
+        );
+        // No entry leaves: the talk is closed
+        assert_eq!(
+            curious_option(&hello, &opts(&["Prontera", "Geffen"]), 0),
+            None
+        );
+        // Words are whole: "hi" is not in "this", "z" is not in "zone"
+        assert_eq!(
+            curious_option(
+                &page("This zone is quiet."),
+                &opts(&["this", "Hi!", "Quit"]),
+                0
+            ),
+            Some(2)
+        );
     }
 
     #[test]
