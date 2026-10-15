@@ -10,25 +10,27 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 
 ## Related repos and locations
 
+The repos are checked out side by side; paths are relative to this repo.
+
 | Repo | Location | Role |
 |---|---|---|
-| rust-ro-bot (this repo) | `C:\Users\Thoma\Documents\sources\rust-ro-bot` | The bot. Rust crate. |
-| smolgent | `C:\Users\Thoma\Documents\sources\smolgent`, https://github.com/pts1667/smolgent | LLM harness. The bot depends on the GitHub repo pinned to a commit (`Cargo.toml`). `ProviderConfig::extra_body` exists for llama.cpp's `thinking_budget_tokens`. |
-| rust-ro (source) | `C:\Users\Thoma\Documents\sources\rust-ro` | The game server source. Bot API code is in `server/src/server/bots/` (`mod.rs`, `http.rs`, `auth.rs`, `controller.rs`, `command.rs`, `lifecycle.rs`, `observation.rs`), and the API docs are in `server/src/server/bots/SKILL.md`. Config defaults are in `lib/configuration/src/configuration.rs`. Git repo, branch `main`. |
-| rust-ro (live test server) | `D:\downloads\ro-sppack\rust-ro` | The copy the test server actually runs from. Its key file, config, and compiled NPC scripts are here. Git repo. |
+| rust-ro-bot (this repo) | `.` | The bot. Rust crate. |
+| smolgent | `../smolgent`, https://github.com/pts1667/smolgent | LLM harness. The bot depends on the GitHub repo pinned to a commit (`Cargo.toml`). `ProviderConfig::extra_body` exists for llama.cpp's `thinking_budget_tokens`. |
+| rust-ro | `../rust-ro`, https://github.com/pts1667/rust-ro | The game server source. Bot API code is in `server/src/server/bots/` (`mod.rs`, `http.rs`, `auth.rs`, `controller.rs`, `command.rs`, `lifecycle.rs`, `observation.rs`), and the API docs are in `server/src/server/bots/SKILL.md`. Config defaults are in `lib/configuration/src/configuration.rs`. Git repo, branch `main`. |
+| rathena | `../rathena` | rAthena, the origin of the server's NPC scripts. The server is pre-renewal: use `npc/pre-re/` and the shared `npc/` folders, not `npc/re/`. |
 
 ### Which copy to trust
 
-- **Bot API key:** use `D:\downloads\ro-sppack\rust-ro\config\bots_api_key.txt`. The copy at
-  `Documents\sources\rust-ro\config\bots_api_key.txt` is not the one the running server reads, and it returns 401.
-  Never print the key or paste it into files, logs, or chat.
-- **Server config:** `D:\downloads\ro-sppack\rust-ro\config.json` is the live config. The `bots` section is absent there,
-  so the defaults apply (port 6902, `start_map` empty, start at 156,191).
-- **Scripts (NPC logic):** the live copy is `D:\downloads\ro-sppack\rust-ro\scripts\src\generated\`. The most useful file
-  for the training grounds is `m_pre_re_jobs_novice_novice.rs`. NPC placements and names are in
-  `D:\downloads\ro-sppack\rust-ro\config\wasm\npcs.json` (entries like `Receptionist#nv1` map to script entry `13818`).
-  The `config\npc` text files in the `Documents` checkout do not cover the training grounds, so do not rely on them
-  for NPC behaviour.
+The test server has run from `../rust-ro` (`./target/release/server.exe --host 127.0.0.1`), and at times from a separate
+deployed copy of rust-ro. Check the working directory of the running `server.exe` and use that copy's files:
+
+- **Bot API key:** `config/bots_api_key.txt` of the running copy. Another copy's key returns 401. Never print the key or
+  paste it into files, logs, or chat.
+- **Server config:** `config.json` of the running copy (git-ignored). Missing sections use the defaults in
+  `lib/configuration/src/configuration.rs` (bots on port 6902, `start_map` empty, start at 156,191).
+- **Scripts (NPC logic):** the Rust NPC scripts are in `scripts/` (one crate per module, built into
+  `config/wasm/modules/`). NPC placements and names are in `config/wasm/npcs.json`, where each NPC names its module and
+  entry. NPC warp destinations, as the reference lists them, are in `config/npc_warps.json`.
 
 ## Services
 
@@ -39,7 +41,7 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 - Decision model: llama.cpp `/v1/systemone` at `http://127.0.0.1:9931` (`--s1-url`), used with `--voice system-one`
   for chat, dialogs, the forum, notes and its `--llm-share` of the goals. A request must fit in the server's physical
   batch (`-ub`).
-- Server logs: `D:\downloads\ro-sppack\logs\server.log`.
+- Server logs: wherever the running server's output goes.
 
 ## Bot API
 
@@ -55,7 +57,7 @@ and runs the steps. A small local LLM picks the goals through smolgent, using SK
 ## Running the bot
 
 ```
-cargo run -- --key-file "D:/downloads/ro-sppack/rust-ro/config/bots_api_key.txt" --name Goapy probe
+cargo run -- --key-file ../rust-ro/config/bots_api_key.txt --name Goapy probe
 cargo run -- --key-file ... --name Goapy run --minutes 10      # add --no-llm for the deterministic strategist
 cargo run -- --key-file ... --name Goapy run --voice system-one --llm-share 0.25  # the decision model talks, takes notes, picks 25% of goals
 cargo run -- --key-file ... --name Goapy llm-check             # one strategist step, prints prompt and decision
@@ -73,7 +75,7 @@ On this machine rustc sometimes crashes with STATUS_STACK_BUFFER_OVERRUN. If it 
 - Test against the live server at `127.0.0.1:6902`. Deleting a bot (`DELETE /bots/{name}`) is irreversible, so only do
   it when asked.
 - Treat `Rusty`'s state on the server as shared test state. The training-area exit is one-way.
-- Do not change files in `D:\downloads\ro-sppack\rust-ro` (config, scripts, or the key) without asking. Changing the server
-  config needs a restart of the server, which only the user can do.
+- Do not change the running server's config, scripts, or key without asking. Changing the server config needs a restart
+  of the server.
 - Do not commit unless asked. Commit messages should end with the attribution line the harness provides.
 - Parse observations defensively (`#[serde(default)]`). The server adds fields over time.
