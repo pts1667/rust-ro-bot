@@ -74,20 +74,32 @@ impl Message {
     }
 }
 
-/// Builds a message from `candidates`, for the situation in `state`: the model goes through the menu (`menu`: a
-/// topic, a sentence of it, Back to the topics) for the first sentence, then says whether to add a second one and
-/// about what, goes through the menu again from there, and last picks the conjunction that joins them. `purpose` says
-/// what the message is for ("answer Bravo"). `only` keeps the candidates to some categories. With `quiet`, saying
-/// nothing is a choice next to the topics. As a last resort, when no sentence fits, the model may pick `Other...` and
-/// type the message itself (`type_message`). `None` when there is nothing to say.
-pub async fn compose(
-    s1: &SystemOne,
-    state: &str,
-    purpose: &str,
-    candidates: &[Phrase],
-    only: Option<&[Category]>,
-    quiet: bool,
-) -> Result<Option<Message>> {
+/// What a message is built for: the situation, its purpose, the sentences to pick from, and the choices around them.
+pub struct Brief<'a> {
+    /// The situation, as the model reads it.
+    pub state: &'a str,
+    /// What the message is for, as the questions put it after "to": "answer Bravo".
+    pub purpose: &'a str,
+    /// The sentences the message may be built from.
+    pub candidates: &'a [Phrase],
+    /// Keeps the candidates to these categories.
+    pub only: Option<&'a [Category]>,
+    /// Saying nothing is a choice next to the topics.
+    pub quiet: bool,
+}
+
+/// Builds a message from the `brief`: the model goes through the menu (`menu`: a topic, a sentence of it, Back to
+/// the topics) for the first sentence, then says whether to add a second one and about what, goes through the menu
+/// again from there, and last picks the conjunction that joins them. As a last resort, when no sentence fits, the
+/// model may pick `Other...` and type the message itself (`type_message`). `None` when there is nothing to say.
+pub async fn compose(s1: &SystemOne, brief: Brief<'_>) -> Result<Option<Message>> {
+    let Brief {
+        state,
+        purpose,
+        candidates,
+        only,
+        quiet,
+    } = brief;
     let offered: Vec<&Phrase> = candidates
         .iter()
         .filter(|p| {

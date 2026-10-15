@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use smolgent::{ChatMessage, ChatSession, Tool, ToolCall, ToolDefinition, ToolRegistry};
 use tokio::sync::{mpsc, watch};
+use tracing::Instrument;
 
 use crate::api::ApiError;
 use crate::api::forum::{
@@ -220,20 +221,35 @@ pub fn finding_of(line: &str) -> Option<Finding> {
     None
 }
 
+/// What the forum task is started with: the bot's forum API, the model it writes and reads with, the reference it
+/// looks things up in, the strategist's snapshots, and where its memory is kept.
+pub struct Start {
+    pub api: ForumApi,
+    pub voice: Voice,
+    pub knowledge: Knowledge,
+    /// The snapshots of the bot the strategist publishes.
+    pub snapshots: watch::Receiver<Option<Snapshot>>,
+    /// Notes taken at the forum go to the strategist as `Event::ForumNotes`.
+    pub events: mpsc::UnboundedSender<Event>,
+    /// The directory `<name>.forum.json` is kept in.
+    pub state_dir: PathBuf,
+}
+
 /// Starts the forum task and the watch of the replies to the bot. Notes taken there go to the strategist as
 /// `Event::ForumNotes`.
-pub fn spawn(
-    api: ForumApi,
-    voice: Voice,
-    knowledge: Knowledge,
-    snapshots: watch::Receiver<Option<Snapshot>>,
-    events: mpsc::UnboundedSender<Event>,
-    state_dir: &Path,
-) {
+pub fn spawn(start: Start) {
+    let Start {
+        api,
+        voice,
+        knowledge,
+        snapshots,
+        events,
+        state_dir,
+    } = start;
     let path = state_dir.join(format!("{}.forum.json", api.name().to_lowercase()));
     let memory = ForumMemory::load(&path);
     let (notices_tx, notices) = mpsc::unbounded_channel();
-    tokio::spawn(listen(api.clone(), memory.ws_seq, notices_tx));
+    tokio::spawn(listen(api.clone(), memory.ws_seq, notices_tx).in_current_span());
     let forum = Forum {
         api,
         voice,
@@ -242,7 +258,7 @@ pub fn spawn(
         path,
         memory,
     };
-    tokio::spawn(forum.run(snapshots, notices));
+    tokio::spawn(forum.run(snapshots, notices).in_current_span());
 }
 
 /// Keeps the reply socket open, opening it again when it closes.

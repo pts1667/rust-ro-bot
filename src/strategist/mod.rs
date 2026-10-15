@@ -24,6 +24,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 use smolgent::{ChatMessage, ChatSession, Tool, ToolDefinition, ToolRegistry};
 use tokio::sync::{mpsc, watch};
+use tracing::Instrument;
 
 use crate::api::Observation;
 use crate::goap::{Goal, WorldState};
@@ -125,6 +126,24 @@ pub struct Handle {
     pub snapshots: watch::Sender<Option<Snapshot>>,
 }
 
+/// The settings of the strategist task, see `spawn`.
+pub struct Settings {
+    pub knowledge: Knowledge,
+    pub llm: Option<Llm>,
+    /// The decision model, which takes its share of the steps when there is no LLM.
+    pub decider: Option<decided::Decider>,
+    /// The strategist thinks at least this often, besides on every event.
+    pub period: Duration,
+}
+
+/// The channels the strategist task talks through: directives out, events and snapshots in, and the goal changes.
+struct Channels {
+    directives: watch::Sender<Option<Directive>>,
+    events: mpsc::UnboundedReceiver<Event>,
+    snapshots: watch::Receiver<Option<Snapshot>>,
+    goal_changes: Arc<AtomicU64>,
+}
+
 /// The outcome of one LLM step.
 #[derive(Debug)]
 pub struct LlmDecision {
@@ -136,32 +155,40 @@ pub struct LlmDecision {
     pub millis: u128,
 }
 
+/// What one LLM step reads: the model, the game knowledge for the lookups, the snapshot, and the options to pick from.
+#[derive(Clone, Copy)]
+pub struct Step<'a> {
+    pub llm: &'a Llm,
+    pub knowledge: &'a Knowledge,
+    pub snap: &'a Snapshot,
+    pub options: &'a [Opt],
+}
+
+/// When an LLM step started and how long its first prompt was: what the decision reports about its cost.
+#[derive(Clone, Copy)]
+struct Cost {
+    start: Instant,
+    prompt_chars: usize,
+}
+
 /// `goal_changes` gets the sequence number of every directive whose goal differs from the previous one, so
 /// long behaviours can stop early.
-/// `decider`: the decision model, which takes its share of the steps when there is no LLM.
 pub fn spawn(
-    knowledge: Knowledge,
-    llm: Option<Llm>,
-    decider: Option<decided::Decider>,
+    settings: Settings,
     mut state: StrategicState,
-    period: Duration,
     goal_changes: Arc<AtomicU64>,
 ) -> Handle {
     examples::scrub_state(&mut state);
     let (dir_tx, dir_rx) = watch::channel(None);
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
     let (snap_tx, snap_rx) = watch::channel(None);
-    tokio::spawn(run(
-        knowledge,
-        llm,
-        decider,
-        state,
-        period,
-        dir_tx,
-        ev_rx,
-        snap_rx,
+    let channels = Channels {
+        directives: dir_tx,
+        events: ev_rx,
+        snapshots: snap_rx,
         goal_changes,
-    ));
+    };
+    tokio::spawn(run(settings, state, channels).in_current_span());
     Handle {
         directives: dir_rx,
         events: ev_tx,
@@ -169,18 +196,13 @@ pub fn spawn(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run(
-    knowledge: Knowledge,
-    llm: Option<Llm>,
-    decider: Option<decided::Decider>,
-    mut state: StrategicState,
-    period: Duration,
-    directives: watch::Sender<Option<Directive>>,
-    mut events: mpsc::UnboundedReceiver<Event>,
-    mut snapshots: watch::Receiver<Option<Snapshot>>,
-    goal_changes: Arc<AtomicU64>,
-) {
+async fn run(settings: Settings, mut state: StrategicState, channels: Channels) {
+    let Channels {
+        directives,
+        mut events,
+        mut snapshots,
+        goal_changes,
+    } = channels;
     let mut seq = 0;
     let mut last_goal: Option<Goal> = None;
     let mut counters = Counters::default();
@@ -196,17 +218,7 @@ async fn run(
     loop {
         let snap = snapshots.borrow().clone();
         let Some(snap) = snap else { return };
-        match decide(
-            &knowledge,
-            llm.as_ref(),
-            decider.as_ref(),
-            &mut state,
-            &snap,
-            &mut counters,
-            &mut history,
-        )
-        .await
-        {
+        match decide(&settings, &mut state, &snap, &mut counters, &mut history).await {
             Ok((chosen, reason, by_llm)) => {
                 let goal = chosen.goal;
                 seq += 1;
@@ -244,7 +256,7 @@ async fn run(
                 }
                 None => return,
             },
-            _ = tokio::time::sleep(period) => why = "periodic".into(),
+            _ = tokio::time::sleep(settings.period) => why = "periodic".into(),
         }
         // Let the agent publish the snapshot that goes with the event, and fold bursts of events into one step.
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -325,14 +337,15 @@ fn pick_second_job(state: &mut StrategicState, snap: &Snapshot) {
 /// One decision: the LLM or the decision model when there is one (for its share of the steps), the fallback
 /// otherwise or when the model fails.
 async fn decide(
-    knowledge: &Knowledge,
-    llm: Option<&Llm>,
-    decider: Option<&decided::Decider>,
+    settings: &Settings,
     state: &mut StrategicState,
     snap: &Snapshot,
     counters: &mut Counters,
     history: &mut Option<history::History>,
 ) -> Result<(Opt, String, bool)> {
+    let knowledge = &settings.knowledge;
+    let llm = settings.llm.as_ref();
+    let decider = settings.decider.as_ref();
     state.on_job(&snap.obs.me.job);
     if state.job_target.is_none() && state.pinned_jobs.is_empty() {
         if snap.obs.me.job.eq_ignore_ascii_case("novice") {
@@ -369,11 +382,17 @@ async fn decide(
     };
     if let Some(llm) = llm {
         counters.llm_calls += 1;
+        let input = Step {
+            llm,
+            knowledge,
+            snap,
+            options: &options,
+        };
         let step = match llm.context {
-            llm::ContextMode::SkillState => llm_step(llm, knowledge, state, snap, &options).await,
+            llm::ContextMode::SkillState => llm_step(input, state).await,
             llm::ContextMode::History => {
                 let h = history.get_or_insert_with(|| history::History::new(llm));
-                let step = h.step(llm, knowledge, state, snap, &options).await;
+                let step = h.step(input, state).await;
                 for line in h.drain() {
                     tracing::info!(target: "strategist", "history: {line}");
                 }
@@ -671,16 +690,17 @@ async fn map_info(k: &Knowledge, name: &str) -> Result<String> {
 }
 
 /// One SKILL.state step with the LLM.
-pub async fn llm_step(
-    llm: &Llm,
-    knowledge: &Knowledge,
-    state: &StrategicState,
-    snap: &Snapshot,
-    options: &[Opt],
-) -> Result<LlmDecision> {
-    let options = shuffled(llm, options);
-    let user = prompt::user_message(llm.order, state, snap, &options);
-    llm_turn(llm, knowledge, snap, &options, user).await
+pub async fn llm_step(step: Step<'_>, state: &StrategicState) -> Result<LlmDecision> {
+    let options = shuffled(step.llm, step.options);
+    let user = prompt::user_message(step.llm.order, state, step.snap, &options);
+    llm_turn(
+        Step {
+            options: &options,
+            ..step
+        },
+        user,
+    )
+    .await
 }
 
 /// The options in random order when the LLM shuffles them: the model favours the first one it reads.
@@ -694,20 +714,23 @@ pub fn shuffled(llm: &Llm, options: &[Opt]) -> Vec<Opt> {
 }
 
 /// One step on a ready user message. `snap` only serves the lookups (the fight estimates of `monster_info`).
-pub async fn llm_turn(
-    llm: &Llm,
-    knowledge: &Knowledge,
-    snap: &Snapshot,
-    options: &[Opt],
-    user: String,
-) -> Result<LlmDecision> {
+pub async fn llm_turn(step: Step<'_>, user: String) -> Result<LlmDecision> {
+    let Step {
+        llm,
+        knowledge,
+        snap,
+        options,
+    } = step;
     let start = Instant::now();
     let system = if llm.examples {
         format!("{}{}", prompt::SYSTEM, examples::text())
     } else {
         prompt::SYSTEM.to_owned()
     };
-    let prompt_chars = system.len() + user.len();
+    let cost = Cost {
+        start,
+        prompt_chars: system.len() + user.len(),
+    };
     let lookups = lookup_tools(knowledge, snap);
     let commit_only = ToolRegistry::new().with_tool(Tool::new(commit_definition(options), |_| {
         Box::pin(async { Ok(Value::Null) })
@@ -747,14 +770,14 @@ pub async fn llm_turn(
                 session.push(ChatMessage::tool_result(&commit.id, "commit", error));
                 continue;
             }
-            return finish(args, options, done_lookups, prompt_chars, start);
+            return finish(args, options, done_lookups, cost);
         }
         if calls.is_empty() {
             // Plain text: accept a JSON answer with the same fields, else ask again with the commit tool forced.
             if let Some(args) = llm::parse_json_loose(&response.message.content.text())
                 && args.get("option").is_some()
             {
-                return finish(args, options, done_lookups, prompt_chars, start);
+                return finish(args, options, done_lookups, cost);
             }
             continue;
         }
@@ -777,13 +800,7 @@ pub async fn llm_turn(
     bail!("the model did not commit")
 }
 
-fn finish(
-    args: Value,
-    options: &[Opt],
-    lookups: Vec<String>,
-    prompt_chars: usize,
-    start: Instant,
-) -> Result<LlmDecision> {
+fn finish(args: Value, options: &[Opt], lookups: Vec<String>, cost: Cost) -> Result<LlmDecision> {
     let id = args["option"].as_str().unwrap_or_default();
     let option = options
         .iter()
@@ -801,8 +818,8 @@ fn finish(
             .collect(),
         patch: args.get("state_patch").cloned().unwrap_or(Value::Null),
         lookups,
-        prompt_chars,
-        millis: start.elapsed().as_millis(),
+        prompt_chars: cost.prompt_chars,
+        millis: cost.start.elapsed().as_millis(),
     })
 }
 

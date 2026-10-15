@@ -6,18 +6,43 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+/// The bot of the commands that drive one bot, when `--name` gives none.
+pub const DEFAULT_NAME: &str = "Rusty";
+
+/// The key file of a rust-ro checked out next to this repo, when neither `--key-file` nor `--key` gives one.
+pub const DEFAULT_KEY_FILE: &str = "../rust-ro/config/bots_api_key.txt";
+
 #[derive(Parser)]
-#[command(about = "A GOAP + small-LLM bot that plays a character on a rust-ro server")]
+#[command(
+    about = "GOAP + small-model bots that play characters on a rust-ro server",
+    long_about = concat!(
+        "GOAP + small-model bots that play characters on a rust-ro server.\n\n",
+        "Without a command, it runs `run`: 50 bots named from names.txt, with the decision model as their voice."
+    ),
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
     #[command(flatten)]
     pub endpoints: Endpoints,
 
-    /// Character name of the bot.
-    #[arg(long, default_value = "Rusty", global = true)]
-    pub name: String,
+    /// Character name of the bot. With `run`, plays that one bot instead of `--bots` bots from `--names`; the other
+    /// commands use Rusty without it.
+    #[arg(long, global = true)]
+    pub name: Option<String>,
+
+    /// The options of `run`, which runs when no command is given.
+    #[command(flatten)]
+    pub run: RunArgs,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+}
+
+impl Cli {
+    /// The bot of a command that drives one bot.
+    pub fn name(&self) -> &str {
+        self.name.as_deref().unwrap_or(DEFAULT_NAME)
+    }
 }
 
 #[derive(Args, Clone)]
@@ -75,7 +100,8 @@ pub struct Endpoints {
     #[command(flatten)]
     pub sampling: Sampling,
 
-    /// File holding the API key (the server's `config/bots_api_key.txt`).
+    /// File holding the API key (the server's `config/bots_api_key.txt`). Without it or `--key`, the key of
+    /// `../rust-ro` is used.
     #[arg(long, env = "BOT_API_KEY_FILE", conflicts_with = "key", global = true)]
     pub key_file: Option<PathBuf>,
 
@@ -92,7 +118,7 @@ pub struct Endpoints {
 pub enum Command {
     /// Connect the bot (creating it if needed) and print what it sees, without acting.
     Probe,
-    /// Play: GOAP executes, the LLM strategist picks goals.
+    /// Play (the command when none is given): GOAP executes, the strategist picks goals.
     Run(RunArgs),
     /// Walk the bot to each map in turn the way a goal's trip goes (warps, NPC ways, `@go`), and print how it ended.
     Travel {
@@ -143,6 +169,18 @@ pub enum Command {
 
 #[derive(Args, Clone)]
 pub struct RunArgs {
+    /// Bots to play at once, named by the first lines of `--names`. A name without a character gets one made.
+    #[arg(long, default_value_t = 50)]
+    pub bots: usize,
+    /// The file of bot names, one per line (`python tools/names.py <count>` adds more).
+    #[arg(long, default_value = "names.txt")]
+    pub names: PathBuf,
+    /// Seconds between two bots joining the game.
+    #[arg(long, default_value_t = 3)]
+    pub join_gap: u64,
+    /// Write each bot's log to `<dir>/<name>.log` instead of the terminal.
+    #[arg(long)]
+    pub log_dir: Option<PathBuf>,
     /// Stop when the bot reaches this base level.
     #[arg(long)]
     pub until_level: Option<u32>,
@@ -157,15 +195,16 @@ pub struct RunArgs {
     pub strategist_period: u64,
     /// Who talks in chat and on the forum and takes the model's share of the goal choices: the LLM in its own words,
     /// or the decision model with sentences of a catalogue.
-    #[arg(long, value_enum, default_value_t = crate::voice::VoiceMode::Llm)]
+    #[arg(long, value_enum, default_value_t = crate::voice::VoiceMode::SystemOne)]
     pub voice: crate::voice::VoiceMode,
     /// Never visit the players' forum (only a bot with a voice visits it).
     #[arg(long)]
     pub no_forum: bool,
     /// Chance (0 to 1) that a strategist step goes to the model (the LLM, or the decision model with
-    /// `--voice system-one`); the others use the deterministic fallback.
-    #[arg(long, default_value_t = 1.0)]
-    pub llm_share: f32,
+    /// `--voice system-one`); the others use the deterministic fallback. Defaults to 0.25 with the decision model,
+    /// 1 with the LLM.
+    #[arg(long)]
+    pub llm_share: Option<f32>,
     /// Layout of the strategist turns.
     #[arg(long, value_enum, default_value_t = Order::TaskFirst)]
     pub order: Order,
@@ -192,6 +231,17 @@ pub struct RunArgs {
     pub job: Option<String>,
 }
 
+impl RunArgs {
+    /// `--llm-share`, or its default for the voice.
+    pub fn share(&self) -> f32 {
+        let default = match self.voice {
+            crate::voice::VoiceMode::SystemOne => 0.25,
+            crate::voice::VoiceMode::Llm => 1.0,
+        };
+        self.llm_share.unwrap_or(default).clamp(0.0, 1.0)
+    }
+}
+
 impl Endpoints {
     /// Reads the key from the file or the env var. The file may carry a UTF-8 BOM (PowerShell writes one),
     /// which the server would not strip, so it goes here.
@@ -200,7 +250,9 @@ impl Endpoints {
             (Some(path), _) => std::fs::read_to_string(path)
                 .with_context(|| format!("reading key file {}", path.display()))?,
             (None, Some(key)) => key.clone(),
-            (None, None) => bail!("no API key: pass --key-file <path> or set BOT_API_KEY_FILE"),
+            (None, None) => std::fs::read_to_string(DEFAULT_KEY_FILE).with_context(|| {
+                format!("no API key: pass --key-file <path> or set BOT_API_KEY_FILE ({DEFAULT_KEY_FILE} is not there)")
+            })?,
         };
         let key = raw.trim_start_matches('\u{feff}').trim().to_owned();
         if key.is_empty() {

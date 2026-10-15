@@ -48,6 +48,13 @@ const FACE_TO_FACE: u32 = 5;
 const STOP_WORDS: [&str; 6] = ["stop", "thanks", "thx", "ty", "bye", "stay"];
 const STOP_PHRASES: [&str; 3] = ["thank you", "wait here", "that's enough"];
 
+/// Who the bot answers: the one who said the line, the channel it was said in, and what the bot is doing now.
+struct Partner<'a> {
+    from: &'a str,
+    channel: Channel,
+    doing: &'a str,
+}
+
 /// Where a line was said, and so where the answer goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -176,6 +183,17 @@ pub fn calls_for_answer(m: &Message, me: &str) -> bool {
 fn names(text: &str, me: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric() && c != '_')
         .any(|w| w.eq_ignore_ascii_case(me))
+}
+
+/// What the strategist decided on the requests: the ones it saw, the option it chose, its goal and its refusals.
+pub struct Decision<'a> {
+    /// Ids of the requests the decision saw.
+    pub asked: &'a [u64],
+    /// The option chosen: `ask:<id>` takes the request `id`.
+    pub chosen: &'a str,
+    pub goal: Option<&'a Goal>,
+    /// Why the bot cannot do some of them, by request id.
+    pub refusals: &'a [(u64, String)],
 }
 
 impl Social {
@@ -337,16 +355,19 @@ impl Social {
         self.last_answer = Some(Instant::now());
     }
 
-    /// What the LLM is told when it answers `from`.
+    /// What the LLM is told when it answers `partner`.
     fn context(
         &self,
         obs: &Observation,
-        from: &str,
-        channel: Channel,
-        doing: &str,
+        partner: Partner<'_>,
         facts: Vec<String>,
         decision: Option<String>,
     ) -> ChatContext {
+        let Partner {
+            from,
+            channel,
+            doing,
+        } = partner;
         let party = obs
             .party
             .as_ref()
@@ -502,9 +523,16 @@ impl Bot {
                 .any(|w| w == h.from.to_lowercase())
         {
             let decision = format!("you stop now, as they asked: you no longer {doing}.");
-            let context =
-                self.social
-                    .context(obs, &h.from, h.channel, doing, Vec::new(), Some(decision));
+            let context = self.social.context(
+                obs,
+                Partner {
+                    from: &h.from,
+                    channel: h.channel,
+                    doing,
+                },
+                Vec::new(),
+                Some(decision),
+            );
             let reply = match self.helper.clone() {
                 Some(helper) => helper
                     .chat(&context, false)
@@ -526,9 +554,16 @@ impl Bot {
                 let lore = facts::lore(&self.knowledge, &h.text).await;
                 let facts: Vec<String> = lore.iter().map(facts::Lore::describe).collect();
                 tracing::debug!(?facts, "facts for the answer");
-                let mut context = self
-                    .social
-                    .context(obs, &h.from, h.channel, doing, facts, None);
+                let mut context = self.social.context(
+                    obs,
+                    Partner {
+                        from: &h.from,
+                        channel: h.channel,
+                        doing,
+                    },
+                    facts,
+                    None,
+                );
                 if helper.decides() {
                     context.known = self.known_for(obs, &h.from, doing, lore);
                 }
@@ -593,14 +628,13 @@ impl Bot {
 
     /// Answers the requests the strategist decided on: yes to the one it chose (or when its goal does what was asked),
     /// no to the others it saw, with the reason when the bot cannot. The LLM words it when there is one.
-    pub async fn answer_requests(
-        &mut self,
-        obs: &Observation,
-        asked: &[u64],
-        chosen: &str,
-        goal: Option<&Goal>,
-        refusals: &[(u64, String)],
-    ) {
+    pub async fn answer_requests(&mut self, obs: &Observation, decision: Decision<'_>) {
+        let Decision {
+            asked,
+            chosen,
+            goal,
+            refusals,
+        } = decision;
         let (decided, waiting): (Vec<Request>, Vec<Request>) =
             std::mem::take(&mut self.social.pending)
                 .into_iter()
@@ -628,9 +662,11 @@ impl Bot {
                 Some(helper) => {
                     let context = self.social.context(
                         obs,
-                        &r.from,
-                        r.channel,
-                        &doing,
+                        Partner {
+                            from: &r.from,
+                            channel: r.channel,
+                            doing: &doing,
+                        },
                         Vec::new(),
                         Some(decision.clone()),
                     );
@@ -727,7 +763,13 @@ impl Bot {
             .map(|r| r.id)
             .collect();
         if !stale.is_empty() {
-            self.answer_requests(obs, &stale, "", goal, &[]).await;
+            let decision = Decision {
+                asked: &stale,
+                chosen: "",
+                goal,
+                refusals: &[],
+            };
+            self.answer_requests(obs, decision).await;
         }
     }
 }

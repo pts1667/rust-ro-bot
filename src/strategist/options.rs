@@ -15,8 +15,9 @@ use crate::goap::goals::HelpTask;
 use crate::goap::state::{HEAL_STOCK_MIN, HEAL_STOCK_WANTED, arrow_count, next_jobs};
 use crate::knowledge::Knowledge;
 use crate::knowledge::combat::Fighter;
+use crate::knowledge::gear::Shopping;
 use crate::knowledge::gear::Slot;
-use crate::knowledge::grounds::{farm_ground, hunting_grounds, is_explorable_map_name};
+use crate::knowledge::grounds::{Hunt, is_explorable_map_name};
 use crate::party::recruit::MAX_MEMBERS;
 use crate::party::support::SPARE_ABOVE;
 use crate::party::{SIGHT, same_job};
@@ -289,17 +290,11 @@ async fn game_options(
         .into_iter()
         .chain(snap.losing_to.iter().cloned())
         .collect();
-    let grounds = hunting_grounds(
-        &knowledge.db,
-        &knowledge.graph,
-        &fighter,
-        &ws.map,
-        HUNT_HOPS,
-        &avoid_maps,
-        &avoid_mobs,
-        HUNT_OPTIONS + 3,
-    )
-    .await?;
+    let grounds = Hunt::new(knowledge, &fighter, &ws.map, HUNT_HOPS)
+        .avoiding_maps(&avoid_maps)
+        .avoiding_mobs(&avoid_mobs)
+        .hunting_grounds(HUNT_OPTIONS + 3)
+        .await?;
     // The model weighs facts it reads next to an option, and overlooks them elsewhere in the observation.
     let here = grounds
         .iter()
@@ -377,10 +372,12 @@ async fn game_options(
         && let Some(up) = knowledge
             .best_upgrade(
                 &snap.obs,
-                budget,
-                GEAR_HOPS,
-                next_job(state, &snap.ws.job),
-                &snap.bad_shops,
+                &Shopping {
+                    budget,
+                    max_hops: GEAR_HOPS,
+                    next_job: next_job(state, &snap.ws.job),
+                    bad_shops: &snap.bad_shops,
+                },
             )
             .await?
     {
@@ -487,7 +484,14 @@ async fn quest_options(
         };
         let option = match &stage.act {
             Act::Gather(need) => {
-                gather_option(snap, knowledge, state, q, &p, need, &head, stage.what)
+                let gather = GatherStage {
+                    quest: q,
+                    progress: &p,
+                    need,
+                    head: &head,
+                    what: stage.what,
+                };
+                gather_option(snap, knowledge, state, gather)
                     .await?
                     .filter(|o| !failed(&o.goal))
             }
@@ -520,19 +524,31 @@ async fn quest_options(
     Ok(out)
 }
 
+/// The gathering stage of a quest that `gather_option` finds an item for: the quest, the bot's progress in it, what
+/// the stage needs, and how the option is named (`head`: the quest and its step, `what`: the stage).
+struct GatherStage<'a> {
+    quest: &'a Quest,
+    progress: &'a QuestProgress,
+    need: &'a Need,
+    head: &'a str,
+    what: &'a str,
+}
+
 /// How to get the first item a gathering stage lacks that the bot can get: bought nearby when it has the zeny,
 /// else hunted.
-#[allow(clippy::too_many_arguments)]
 async fn gather_option(
     snap: &Snapshot,
     knowledge: &Knowledge,
     state: &StrategicState,
-    q: &Quest,
-    p: &QuestProgress,
-    need: &Need,
-    head: &str,
-    what: &str,
+    stage: GatherStage<'_>,
 ) -> Result<Option<Opt>> {
+    let GatherStage {
+        quest: q,
+        progress: p,
+        need,
+        head,
+        what,
+    } = stage;
     let obs = &snap.obs;
     let here = obs.map.name.as_str();
     let avoid_maps: HashSet<String> = state.avoid_maps.iter().cloned().collect();
@@ -595,17 +611,11 @@ async fn gather_option(
             )));
         }
         let fighter = knowledge.fighter(obs).await?;
-        if let Some((ground, mob)) = farm_ground(
-            &knowledge.db,
-            &knowledge.graph,
-            &fighter,
-            here,
-            &data,
-            QUEST_FARM_HOPS,
-            &avoid_maps,
-            &avoid_mobs,
-        )
-        .await?
+        if let Some((ground, mob)) = Hunt::new(knowledge, &fighter, here, QUEST_FARM_HOPS)
+            .avoiding_maps(&avoid_maps)
+            .avoiding_mobs(&avoid_mobs)
+            .farm_ground(&data)
+            .await?
         {
             return Ok(Some(opt(
                 id,

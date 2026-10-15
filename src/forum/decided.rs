@@ -8,7 +8,7 @@ use crate::social::facts;
 use crate::voice::known::{Known, Lesson, journal_phrases, lessons_of};
 use crate::voice::phrase::{Category, Phrase, parse};
 use crate::voice::systemone::{Question, SystemOne};
-use crate::voice::{compose, state_of};
+use crate::voice::{Brief, compose, state_of};
 
 /// The decision model's chance of yes above which the bot writes, or keeps a lesson.
 const WRITE_GATE: f64 = 0.5;
@@ -42,7 +42,15 @@ impl Forum {
             {
                 continue;
             }
-            learn(&v, n.thread_id, &name, &known, &mut lessons);
+            learn(
+                &v,
+                n.thread_id,
+                Learner {
+                    name: &name,
+                    known: &known,
+                },
+                &mut lessons,
+            );
             let said = forum_text(&n.body, 200, true);
             let gate = format!(
                 "{} wrote to {name}: \"{said}\". Should {name} write back?",
@@ -53,10 +61,12 @@ impl Forum {
                 s1,
                 &mut v,
                 &mut known,
-                n.thread_id,
-                Some(n.comment_id),
-                &gate,
-                &purpose,
+                Comment {
+                    thread: n.thread_id,
+                    reply_to: Some(n.comment_id),
+                    gate: &gate,
+                    purpose: &purpose,
+                },
             )
             .await?;
         }
@@ -110,16 +120,26 @@ impl Forum {
             if self.read_thread(&mut v, id).await.is_err() {
                 break;
             }
-            learn(&v, id, &name, &known, &mut lessons);
+            learn(
+                &v,
+                id,
+                Learner {
+                    name: &name,
+                    known: &known,
+                },
+                &mut lessons,
+            );
             let gate = format!("Does {name} have something useful to add to this thread?");
             self.maybe_comment(
                 s1,
                 &mut v,
                 &mut known,
-                id,
-                None,
-                &gate,
-                "add something useful to the thread",
+                Comment {
+                    thread: id,
+                    reply_to: None,
+                    gate: &gate,
+                    purpose: "add something useful to the thread",
+                },
             )
             .await?;
         }
@@ -140,11 +160,14 @@ impl Forum {
         s1: &SystemOne,
         v: &mut Visit,
         known: &mut Known,
-        thread: u64,
-        reply_to: Option<u64>,
-        gate: &str,
-        purpose: &str,
+        comment: Comment<'_>,
     ) -> Result<()> {
+        let Comment {
+            thread,
+            reply_to,
+            gate,
+            purpose,
+        } = comment;
         if let Err(why) = self.may_comment(v, thread) {
             tracing::debug!(target: "forum", thread, %why, "no comment");
             return Ok(());
@@ -175,11 +198,13 @@ impl Forum {
             .collect();
         let Some(message) = compose(
             s1,
-            &state,
-            purpose,
-            &candidates,
-            Some(&COMMENT_KINDS),
-            false,
+            Brief {
+                state: &state,
+                purpose,
+                candidates: &candidates,
+                only: Some(&COMMENT_KINDS),
+                quiet: false,
+            },
         )
         .await?
         else {
@@ -253,8 +278,26 @@ impl Forum {
     }
 }
 
+/// A comment to write on a thread: the thread, the comment it answers if any, the question the model is asked
+/// whether to write, and what the comment is for.
+struct Comment<'a> {
+    thread: u64,
+    reply_to: Option<u64>,
+    /// The question whether to write, as the model reads it.
+    gate: &'a str,
+    /// What the comment is for, as `compose` reads it.
+    purpose: &'a str,
+}
+
+/// Who takes the lessons: the bot's name on the forum, and what it knows of itself.
+struct Learner<'a> {
+    name: &'a str,
+    known: &'a Known,
+}
+
 /// Takes the lessons for the bot in the catalogue sentences others wrote in a thread read.
-fn learn(v: &Visit, thread: u64, me: &str, known: &Known, lessons: &mut Vec<Lesson>) {
+fn learn(v: &Visit, thread: u64, learner: Learner<'_>, lessons: &mut Vec<Lesson>) {
+    let Learner { name: me, known } = learner;
     let Some(view) = v.read.get(&thread) else {
         return;
     };

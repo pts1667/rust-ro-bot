@@ -57,16 +57,21 @@ deployed copy of rust-ro. Check the working directory of the running `server.exe
 ## Running the bot
 
 ```
+cargo run --release                                            # 50 bots from names.txt, decision model voice, llm-share 0.25
+cargo run --release -- --bots 10 --minutes 25 --log-dir logs  # one log per bot in logs/<name>.log
 cargo run -- --key-file ../rust-ro/config/bots_api_key.txt --name Goapy probe
-cargo run -- --key-file ... --name Goapy run --minutes 10      # add --no-llm for the deterministic strategist
-cargo run -- --key-file ... --name Goapy run --voice system-one --llm-share 0.25  # the decision model talks, takes notes, picks 25% of goals
-cargo run -- --key-file ... --name Goapy llm-check             # one strategist step, prints prompt and decision
+cargo run -- --name Goapy run --minutes 10                    # one bot; add --no-llm for the deterministic strategist
+cargo run -- --name Goapy run --voice llm                     # the LLM talks and picks every goal (--llm-share 1)
+cargo run -- --name Goapy llm-check                           # one strategist step, prints prompt and decision
 cargo run -- --key-file ... --name Alfa run --party Wayfarers --friends Alfa,Bravo --lead   # one process per member
 # without --party a bot finds a party on the booking board by itself; --solo plays alone
 cargo run -- db maps/prt_fild08                                # also: db grounds [map], db route from:to, db farm <item id>[@map]
 ```
 
-`probe` creates the character if it does not exist, connects it if it does not, and prints a summary. In Git Bash, a
+Without `--key-file` or `--key`, the key is read from `../rust-ro/config/bots_api_key.txt`. `run` makes the character
+of a name that has none and logs in the others. `names.txt` keeps the names of earlier runs first, so their characters
+play on; `python tools/names.py <count>` adds more. `probe` creates the character if it does not exist, connects it if
+it does not, and prints a summary. In Git Bash, a
 leading `/db/...` argument is rewritten into a Windows path, so pass `maps/...` without the slash.
 On this machine rustc sometimes crashes with STATUS_STACK_BUFFER_OVERRUN. If it does, set `RUST_MIN_STACK=67108864`.
 

@@ -44,17 +44,23 @@ impl Knowledge {
         }
     }
 
-    /// The best piece of equipment the bot can buy for `budget` zeny, at a shop at most `max_hops` warps away on a way
-    /// that crosses no deadly map (`grounds::safe_hops`), that `next_job` can wear too. Counted by plain warps, shops in
-    /// Einbroch, Lighthalzen and Veins sent bots from Rachel through Drosera and Hill Wind: 9 deaths in 40 minutes.
+    /// The same knowledge for another bot: the reference is shared, the warps a bot could not take are its own.
+    pub fn for_bot(&self) -> Self {
+        Self {
+            graph: self.graph.with_own_bans(),
+            ..self.clone()
+        }
+    }
+
+    /// The best piece of equipment the bot can buy with `shopping`, at a shop at most its `max_hops` warps away on a
+    /// way that crosses no deadly map (`Hunt::safe_hops`). Counted by plain warps, shops in Einbroch, Lighthalzen and
+    /// Veins sent bots from Rachel through Drosera and Hill Wind: 9 deaths in 40 minutes.
     pub async fn best_upgrade(
         &self,
         obs: &Observation,
-        budget: u64,
-        max_hops: u32,
-        next_job: Option<&str>,
-        bad_shops: &[String],
+        shopping: &gear::Shopping<'_>,
     ) -> Result<Option<gear::Upgrade>> {
+        let max_hops = shopping.max_hops;
         let cached = self.gear_catalog.lock().unwrap().clone();
         let catalog = match cached {
             Some(c) => c,
@@ -74,21 +80,13 @@ impl Knowledge {
         let mut lethal = HashMap::new();
         // The best upgrade at a shop the bot can reach safely: shops on maps without such a way are left out, one at a time
         for _ in 0..SAFE_SHOP_TRIES {
-            let Some(up) = gear::best_upgrade(&catalog, obs, budget, &hops, next_job, bad_shops)
-            else {
+            let Some(up) = gear::best_upgrade(&catalog, obs, &hops, shopping) else {
                 return Ok(None);
             };
             let map = up.shop.map.id_str();
-            let safe = grounds::safe_hops(
-                &self.db,
-                &self.graph,
-                &fighter,
-                &obs.map.name,
-                &map,
-                &Default::default(),
-                &mut lethal,
-            )
-            .await?;
+            let safe = grounds::Hunt::new(self, &fighter, &obs.map.name, max_hops)
+                .safe_hops(&map, &mut lethal)
+                .await?;
             match safe {
                 Some(h) if h <= max_hops => return Ok(Some(gear::Upgrade { hops: h, ..up })),
                 _ => {

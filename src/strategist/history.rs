@@ -19,10 +19,10 @@ use smolgent::{
 };
 
 use super::llm::{LLM_TIMEOUT, Llm};
-use super::options::Opt;
 use super::skill_state::StrategicState;
-use super::{LlmDecision, Snapshot, commit_tool, examples, finish, lookup_tools, prompt, shuffled};
-use crate::knowledge::Knowledge;
+use super::{
+    Cost, LlmDecision, Step, commit_tool, examples, finish, lookup_tools, prompt, shuffled,
+};
 
 /// Estimated tokens at which the oldest turns are dropped, and the size that leaves. Each llama.cpp slot holds 100k.
 pub const COMPACT_AT: usize = 70_000;
@@ -45,20 +45,40 @@ pub struct History {
     telemetry: Option<TelemetryEventReceiver>,
 }
 
+/// How a history session compacts, and what it records.
+#[derive(Debug, Clone, Copy)]
+pub struct HistorySettings {
+    /// Estimated tokens at which the oldest turns are dropped.
+    pub compact_at: usize,
+    /// Estimated tokens the session is trimmed to.
+    pub compact_to: usize,
+    /// Asks the model to compact first (the trim still follows if it falls short).
+    pub model_compaction: bool,
+    /// Records every request and response too, for `history-check`.
+    pub trace: bool,
+}
+
 impl History {
     pub fn new(llm: &Llm) -> Self {
-        Self::with(llm, COMPACT_AT, COMPACT_TO, false, false)
+        Self::with(
+            llm,
+            HistorySettings {
+                compact_at: COMPACT_AT,
+                compact_to: COMPACT_TO,
+                model_compaction: false,
+                trace: false,
+            },
+        )
     }
 
-    /// `model_compaction` first asks the model to compact (the trim still follows if it falls short); `trace` also
-    /// records every request and response. Both for `history-check`.
-    pub fn with(
-        llm: &Llm,
-        compact_at: usize,
-        compact_to: usize,
-        model_compaction: bool,
-        trace: bool,
-    ) -> Self {
+    /// A session with `settings`, see `HistorySettings`.
+    pub fn with(llm: &Llm, settings: HistorySettings) -> Self {
+        let HistorySettings {
+            compact_at,
+            compact_to,
+            model_compaction,
+            trace,
+        } = settings;
         let mut system = format!("{}{HISTORY_NOTE}", prompt::SYSTEM);
         if llm.examples {
             system.push_str(&examples::text());
@@ -185,14 +205,13 @@ impl History {
     }
 
     /// One strategist step as a new turn of the conversation.
-    pub async fn step(
-        &mut self,
-        llm: &Llm,
-        knowledge: &Knowledge,
-        state: &StrategicState,
-        snap: &Snapshot,
-        options: &[Opt],
-    ) -> Result<LlmDecision> {
+    pub async fn step(&mut self, step: Step<'_>, state: &StrategicState) -> Result<LlmDecision> {
+        let Step {
+            llm,
+            knowledge,
+            snap,
+            options,
+        } = step;
         let start = Instant::now();
         self.turn += 1;
         let options = shuffled(llm, options);
@@ -235,7 +254,15 @@ impl History {
         .await;
         let args = committed.lock().unwrap().take();
         match (args, result) {
-            (Some(args), _) => finish(args, &options, Vec::new(), prompt_chars, start),
+            (Some(args), _) => finish(
+                args,
+                &options,
+                Vec::new(),
+                Cost {
+                    start,
+                    prompt_chars,
+                },
+            ),
             (None, Err(_)) => Err(anyhow!("LLM timed out")),
             (None, Ok(Err(e))) => Err(anyhow!("LLM request failed: {e}")),
             (None, Ok(Ok(_))) => Err(anyhow!("the model answered without committing")),

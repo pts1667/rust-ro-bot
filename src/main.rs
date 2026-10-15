@@ -6,6 +6,7 @@ mod config;
 mod forum;
 mod goap;
 mod knowledge;
+mod logging;
 mod memory;
 mod party;
 mod quests;
@@ -14,15 +15,17 @@ mod strategist;
 mod voice;
 
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing::Instrument;
 
 use api::{BotApi, Observation};
 use bot::Bot;
-use config::{Cli, Command, RunArgs};
+use config::{Cli, Command, Endpoints, RunArgs};
 use knowledge::Knowledge;
 use knowledge::db::Db;
 use memory::Memory;
@@ -31,43 +34,48 @@ use strategist::llm::Llm;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
-    // A name read from a file with Windows line ends keeps its `\r`, and the server makes a character of it
-    if cli.name.trim().is_empty()
-        || cli.name.chars().any(|c| c.is_control())
-        || cli.name != cli.name.trim()
-    {
-        bail!(
-            "bad character name {:?}: no control characters or spaces around it",
-            cli.name
-        );
+    // `run` is the command when none is given
+    let run_args = match &cli.command {
+        None => Some(cli.run.clone()),
+        Some(Command::Run(args)) => Some(args.clone()),
+        Some(_) => None,
+    };
+    let names = match &run_args {
+        Some(args) => bot_names(cli.name.as_deref(), args)?,
+        None => vec![cli.name().to_owned()],
+    };
+    for name in &names {
+        check_name(name)?;
     }
+    logging::init(run_args.as_ref().and_then(|a| a.log_dir.as_deref()), &names)?;
     let db = Db::new(&cli.endpoints.db_url, Some(cli.endpoints.cache_dir()))?;
     let knowledge = Knowledge::new(db);
+    let name = cli.name();
 
-    match &cli.command {
+    if let Some(args) = run_args {
+        return run_bots(&cli.endpoints, knowledge, args, names).await;
+    }
+    let Some(command) = &cli.command else {
+        unreachable!("no command runs `run`")
+    };
+    match command {
         Command::Db { path, arg } => db_command(&cli, &knowledge, path, arg).await,
         Command::Probe => {
             let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-            ensure_connected(&api, &cli.name).await?;
-            let obs = wait_ready(&api, &cli.name).await?;
+            ensure_connected(&api, name).await?;
+            let obs = wait_ready(&api, name).await?;
             print_summary(&obs);
             Ok(())
         }
-        Command::Run(args) => run(&cli, knowledge, args.clone()).await,
+        Command::Run(_) => unreachable!("handled above"),
         Command::Travel { to } => {
             let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-            ensure_connected(&api, &cli.name).await?;
-            wait_ready(&api, &cli.name).await?;
-            let memory = Memory::load(&cli.endpoints.state_dir(), &cli.name)?;
+            ensure_connected(&api, name).await?;
+            wait_ready(&api, name).await?;
+            let memory = Memory::load(&cli.endpoints.state_dir(), name)?;
             knowledge.graph.forbid(memory.bad_warps.iter().cloned());
-            let mut bot = Bot::new(api, cli.name.clone(), knowledge, memory, None);
+            let mut bot = Bot::new(api, name.to_owned(), knowledge, memory, None);
             for map in to {
                 let outcome = bot.travel(map).await?;
                 let obs = bot.observe().await?;
@@ -119,29 +127,161 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
-    let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-    ensure_connected(&api, &cli.name).await?;
-    wait_ready(&api, &cli.name).await?;
-    let memory = Memory::load(&cli.endpoints.state_dir(), &cli.name)?;
+/// The bots `run` plays: the one of `--name`, or the first `--bots` names of the `--names` file.
+fn bot_names(name: Option<&str>, args: &RunArgs) -> Result<Vec<String>> {
+    if let Some(name) = name {
+        return Ok(vec![name.to_owned()]);
+    }
+    let text = std::fs::read_to_string(&args.names)
+        .with_context(|| format!("reading the bot names in {}", args.names.display()))?;
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(line)) {
+            names.push(line.to_owned());
+        }
+    }
+    if names.len() < args.bots {
+        bail!(
+            "{} has {} names for {} bots: add some with `python tools/names.py <count>`",
+            args.names.display(),
+            names.len(),
+            args.bots
+        );
+    }
+    names.truncate(args.bots);
+    Ok(names)
+}
+
+/// A character name the server takes: at most 19 characters, nothing around it. A name read from a file with Windows
+/// line ends would keep its `\r`, and the server would make a character of it.
+fn check_name(name: &str) -> Result<()> {
+    if name.trim().is_empty()
+        || name.chars().any(|c| c.is_control())
+        || name != name.trim()
+        || name.chars().count() > 19
+    {
+        bail!(
+            "bad character name {name:?}: at most 19 characters, no control characters or spaces around it"
+        );
+    }
+    Ok(())
+}
+
+/// Plays `names`, one bot after the other joining `--join-gap` seconds apart, until each has stopped. Ctrl-C stops
+/// them all after their current step.
+async fn run_bots(
+    endpoints: &Endpoints,
+    knowledge: Knowledge,
+    args: RunArgs,
+    names: Vec<String>,
+) -> Result<()> {
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::info!("Ctrl-C: stopping after the current step");
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+    // One bot logs to the terminal as before; with several, each line says whose it is
+    let named = names.len() > 1 || args.log_dir.is_some();
+    if let Some(dir) = &args.log_dir {
+        tracing::info!(bots = names.len(), dir = %dir.display(), "each bot logs to <dir>/<name>.log");
+    }
+    let mut bots = tokio::task::JoinSet::new();
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 && !wait_unless(&stop, Duration::from_secs(args.join_gap)).await {
+            break;
+        }
+        let span = if named {
+            tracing::info_span!(logging::BOT_SPAN, name = name.as_str())
+        } else {
+            tracing::Span::none()
+        };
+        let (endpoints, knowledge, args, stop) = (
+            endpoints.clone(),
+            knowledge.for_bot(),
+            args.clone(),
+            stop.clone(),
+        );
+        let name = name.clone();
+        bots.spawn(async move {
+            let result = run(&endpoints, &name, knowledge, args, stop)
+                .instrument(span)
+                .await;
+            (name, result)
+        });
+    }
+    let (mut ended, mut failed) = (0, Vec::new());
+    while let Some(joined) = bots.join_next().await {
+        ended += 1;
+        match joined {
+            Ok((_, Ok(()))) => {}
+            Ok((name, Err(error))) => {
+                tracing::warn!(bot = %name, error = format!("{error:#}"), "the bot stopped on an error");
+                failed.push(error);
+            }
+            Err(error) => tracing::warn!(%error, "a bot's task ended badly"),
+        }
+    }
+    if names.len() > 1 {
+        tracing::info!(bots = ended, failed = failed.len(), "all bots stopped");
+    }
+    if ended == 1
+        && let Some(error) = failed.pop()
+    {
+        return Err(error);
+    }
+    if ended > 0 && failed.len() == ended {
+        bail!("every bot stopped on an error");
+    }
+    Ok(())
+}
+
+/// Waits `time` unless `stop` is set first: whether it was not.
+async fn wait_unless(stop: &AtomicBool, time: Duration) -> bool {
+    let until = tokio::time::Instant::now() + time;
+    while tokio::time::Instant::now() < until {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
+/// Plays the bot `name`, its character made first when it has none.
+async fn run(
+    endpoints: &Endpoints,
+    name: &str,
+    knowledge: Knowledge,
+    args: RunArgs,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
+    let api = BotApi::new(&endpoints.url, endpoints.load_key()?)?;
+    ensure_connected(&api, name).await?;
+    wait_ready(&api, name).await?;
+    let memory = Memory::load(&endpoints.state_dir(), name)?;
     knowledge.graph.forbid(memory.bad_warps.iter().cloned());
 
     let llm = if args.no_llm || args.voice != voice::VoiceMode::Llm {
         None
     } else {
         let mut llm = Llm::new(
-            &cli.endpoints.llm_url,
-            &cli.endpoints.llm_model,
-            cli.endpoints.llm_think,
-            &cli.endpoints.sampling,
+            &endpoints.llm_url,
+            &endpoints.llm_model,
+            endpoints.llm_think,
+            &endpoints.sampling,
         )?;
-        llm.share = args.llm_share.clamp(0.0, 1.0);
+        llm.share = args.share();
         llm.order = args.order;
         llm.context = args.context;
         if llm.healthy().await {
             Some(llm)
         } else {
-            tracing::warn!(url = %cli.endpoints.llm_url, "the LLM does not answer: playing with the fallback strategist");
+            tracing::warn!(url = %endpoints.llm_url, "the LLM does not answer: playing with the fallback strategist");
             None
         }
     };
@@ -149,18 +289,18 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
         _ if args.no_llm => None,
         voice::VoiceMode::Llm => llm.clone().map(voice::Voice::Llm),
         voice::VoiceMode::SystemOne => {
-            let s1 = voice::systemone::SystemOne::new(&cli.endpoints.s1_url)?;
+            let s1 = voice::systemone::SystemOne::new(&endpoints.s1_url)?;
             if s1.healthy().await {
-                tracing::info!(url = %cli.endpoints.s1_url, share = args.llm_share, "the decision model talks and picks a share of the goals");
+                tracing::info!(url = %endpoints.s1_url, share = args.share(), "the decision model talks and picks a share of the goals");
                 Some(voice::Voice::SystemOne(s1))
             } else {
-                tracing::warn!(url = %cli.endpoints.s1_url, "the decision model does not answer: playing without a voice");
+                tracing::warn!(url = %endpoints.s1_url, "the decision model does not answer: playing without a voice");
                 None
             }
         }
     };
     let helper = voice.clone().map(Helper::new);
-    let mut bot = Bot::new(api, cli.name.clone(), knowledge.clone(), memory, helper);
+    let mut bot = Bot::new(api, name.to_owned(), knowledge.clone(), memory, helper);
     if let Some(job) = &args.job {
         let Some((path, build)) = strategist::skill_state::job_path(job) else {
             bail!("unknown job {job}")
@@ -201,34 +341,35 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
     let forum_voice = voice.clone().filter(|_| !args.no_forum);
     // With the decision model talking, it also takes its share (`--llm-share`) of the strategist steps
     let decider = match &voice {
-        Some(voice::Voice::SystemOne(s1)) => Some(strategist::decided::Decider::new(
-            s1.clone(),
-            args.llm_share.clamp(0.0, 1.0),
-        )),
+        Some(voice::Voice::SystemOne(s1)) => {
+            Some(strategist::decided::Decider::new(s1.clone(), args.share()))
+        }
         _ => None,
     };
-    let handle = strategist::spawn(
+    let settings = strategist::Settings {
         knowledge,
         llm,
         decider,
+        period: Duration::from_secs(args.strategist_period.max(5)),
+    };
+    let handle = strategist::spawn(
+        settings,
         bot.memory.strategy.clone(),
-        Duration::from_secs(args.strategist_period.max(5)),
         bot.latest_directive.clone(),
     );
     // The forum is read and written with a model only: without one the bot has nothing to say there
     if let Some(voice) = forum_voice {
-        let api =
-            api::forum::ForumApi::new(&cli.endpoints.url, cli.endpoints.load_key()?, &cli.name)?;
-        forum::spawn(
+        let api = api::forum::ForumApi::new(&endpoints.url, endpoints.load_key()?, name)?;
+        forum::spawn(forum::Start {
             api,
             voice,
-            bot.knowledge.clone(),
-            handle.snapshots.subscribe(),
-            handle.events.clone(),
-            &cli.endpoints.state_dir(),
-        );
+            knowledge: bot.knowledge.clone(),
+            snapshots: handle.snapshots.subscribe(),
+            events: handle.events.clone(),
+            state_dir: endpoints.state_dir(),
+        });
     }
-    agent::run(bot, handle, args).await
+    agent::run(bot, handle, args, stop).await
 }
 
 /// One strategist step on the current game state, printing the prompt and the decision.
@@ -236,9 +377,9 @@ async fn run(cli: &Cli, knowledge: Knowledge, args: RunArgs) -> Result<()> {
 async fn live_snapshot(cli: &Cli, knowledge: &Knowledge) -> Result<(strategist::Snapshot, Memory)> {
     use strategist::Snapshot;
     let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-    ensure_connected(&api, &cli.name).await?;
-    let obs = wait_ready(&api, &cli.name).await?;
-    let memory = Memory::load(&cli.endpoints.state_dir(), &cli.name)?;
+    ensure_connected(&api, cli.name()).await?;
+    let obs = wait_ready(&api, cli.name()).await?;
+    let memory = Memory::load(&cli.endpoints.state_dir(), cli.name())?;
     knowledge.graph.forbid(memory.bad_warps.iter().cloned());
     knowledge.learn_heals(&obs).await;
     let heal_hp = knowledge.heal_stock(&obs);
@@ -278,7 +419,7 @@ async fn llm_check(
     knowledge: Knowledge,
     order: strategist::prompt::Order,
 ) -> Result<()> {
-    use strategist::{llm_step, options::build_options, prompt};
+    use strategist::{Step, llm_step, options::build_options, prompt};
     let (snap, memory) = live_snapshot(cli, &knowledge).await?;
     let options = build_options(&snap, &knowledge, &memory.strategy).await?;
     let user = prompt::user_message(order, &memory.strategy, &snap, &options);
@@ -299,7 +440,13 @@ async fn llm_check(
     )?;
     llm.order = order;
     for i in 1..=3 {
-        match llm_step(&llm, &knowledge, &memory.strategy, &snap, &options).await {
+        let step = Step {
+            llm: &llm,
+            knowledge: &knowledge,
+            snap: &snap,
+            options: &options,
+        };
+        match llm_step(step, &memory.strategy).await {
             Ok(d) => {
                 let mut state = memory.strategy.clone();
                 let report = state.apply_patch(&d.patch);
@@ -344,14 +491,23 @@ async fn history_check(
         cli.endpoints.llm_think,
         &cli.endpoints.sampling,
     )?;
-    let mut history =
-        strategist::history::History::with(&llm, compact_at, compact_to, model_compaction, true);
+    let settings = strategist::history::HistorySettings {
+        compact_at,
+        compact_to,
+        model_compaction,
+        trace: true,
+    };
+    let mut history = strategist::history::History::with(&llm, settings);
     for turn in 1..=turns {
         snap.goal_secs = 60 * turn as u64;
         let start = std::time::Instant::now();
-        let result = history
-            .step(&llm, &knowledge, &memory.strategy, &snap, &options)
-            .await;
+        let step = strategist::Step {
+            llm: &llm,
+            knowledge: &knowledge,
+            snap: &snap,
+            options: &options,
+        };
+        let result = history.step(step, &memory.strategy).await;
         println!(
             "=== turn {turn} ({} ms, {} tokens after) ===",
             start.elapsed().as_millis(),
@@ -371,7 +527,7 @@ async fn history_check(
 async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> Result<()> {
     if path == "grounds" {
         let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-        let obs = api.observation(&cli.name).await?;
+        let obs = api.observation(cli.name()).await?;
         let fighter = knowledge.fighter(&obs).await?;
         let from = if arg.is_empty() {
             obs.map.name.clone()
@@ -379,17 +535,9 @@ async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> 
             arg.to_owned()
         };
         println!("{fighter:?}");
-        let grounds = knowledge::grounds::hunting_grounds(
-            &knowledge.db,
-            &knowledge.graph,
-            &fighter,
-            &from,
-            4,
-            &HashSet::new(),
-            &HashSet::new(),
-            10,
-        )
-        .await?;
+        let grounds = knowledge::grounds::Hunt::new(knowledge, &fighter, &from, 4)
+            .hunting_grounds(10)
+            .await?;
         for g in grounds {
             println!("{:6.3} {}", g.score, g.describe());
         }
@@ -398,21 +546,13 @@ async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> 
     // `db farm <item id>[@map]`: where the bot would hunt for an item, from its map or the one given.
     if path == "farm" {
         let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-        let obs = api.observation(&cli.name).await?;
+        let obs = api.observation(cli.name()).await?;
         let fighter = knowledge.fighter(&obs).await?;
         let (item, from) = arg.split_once('@').unwrap_or((arg, obs.map.name.as_str()));
         let item = knowledge.db.item(item.parse()?).await?;
-        let farm = knowledge::grounds::farm_ground(
-            &knowledge.db,
-            &knowledge.graph,
-            &fighter,
-            from,
-            &item,
-            6,
-            &HashSet::new(),
-            &HashSet::new(),
-        )
-        .await?;
+        let farm = knowledge::grounds::Hunt::new(knowledge, &fighter, from, 6)
+            .farm_ground(&item)
+            .await?;
         match farm {
             Some((g, mob)) => println!(
                 "{} from {from}: hunt {mob} on {}",
@@ -425,12 +565,21 @@ async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> 
     }
     if path == "gear" {
         let api = BotApi::new(&cli.endpoints.url, cli.endpoints.load_key()?)?;
-        let obs = api.observation(&cli.name).await?;
+        let obs = api.observation(cli.name()).await?;
         let budget = behaviors::gear::gear_budget(obs.me.zeny, 50);
         println!("{:?}", knowledge::gear::Worn::of(&obs));
         println!(
             "budget {budget}: {:#?}",
-            knowledge.best_upgrade(&obs, budget, 10, None, &[]).await?
+            knowledge
+                .best_upgrade(
+                    &obs,
+                    &knowledge::gear::Shopping {
+                        budget,
+                        max_hops: 10,
+                        ..Default::default()
+                    }
+                )
+                .await?
         );
         return Ok(());
     }

@@ -330,16 +330,32 @@ pub async fn shop_catalog(db: &Db) -> Result<Vec<ItemData>> {
     Ok(items)
 }
 
-/// The best piece the bot can buy for `budget` zeny at a shop it knows a way to, `hops` giving the warps to each map.
-/// With a `next_job`, only what that job can wear as well.
+/// What the bot shops for gear with.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shopping<'a> {
+    /// The zeny one piece may cost.
+    pub budget: u64,
+    /// Most warps to the shop.
+    pub max_hops: u32,
+    /// The job the bot heads for: only what it can wear as well.
+    pub next_job: Option<&'a str>,
+    /// Shops left out, by their `key`.
+    pub bad_shops: &'a [String],
+}
+
+/// The best piece the bot can buy with `shopping` at a shop it knows a way to, `hops` giving the warps to each map.
 pub fn best_upgrade(
     catalog: &[ItemData],
     obs: &Observation,
-    budget: u64,
     hops: &HashMap<String, u32>,
-    next_job: Option<&str>,
-    bad_shops: &[String],
+    shopping: &Shopping<'_>,
 ) -> Option<Upgrade> {
+    let Shopping {
+        budget,
+        next_job,
+        bad_shops,
+        ..
+    } = *shopping;
     let worn = Worn::of(obs);
     let mut best: Option<Upgrade> = None;
     for item in catalog
@@ -508,11 +524,15 @@ mod tests {
             ),
         ];
         let hops = HashMap::from([("prt_in".to_string(), 2)]);
-        let up = best_upgrade(&catalog, &swordman(), 5000, &hops, None, &[]).unwrap();
+        let shopping = Shopping {
+            budget: 5000,
+            ..Default::default()
+        };
+        let up = best_upgrade(&catalog, &swordman(), &hops, &shopping).unwrap();
         assert_eq!(up.name, "Blade");
         assert_eq!(up.gain, 36.0);
         // The suit is sold only where the bot knows no way to.
-        let up = best_upgrade(&catalog[3..], &swordman(), 5000, &hops, None, &[]);
+        let up = best_upgrade(&catalog[3..], &swordman(), &hops, &shopping);
         assert!(up.is_none());
     }
 
@@ -526,7 +546,14 @@ mod tests {
         mace.job_flags = job_flags("Novice") | job_flags("Acolyte") | job_flags("Swordman");
         let catalog = vec![axe, mace];
         let hops = HashMap::from([("prt_in".to_string(), 1)]);
-        let pick = |next| best_upgrade(&catalog, &novice, 5000, &hops, next, &[]).map(|u| u.name);
+        let pick = |next_job| {
+            let shopping = Shopping {
+                budget: 5000,
+                next_job,
+                ..Default::default()
+            };
+            best_upgrade(&catalog, &novice, &hops, &shopping).map(|u| u.name)
+        };
         assert_eq!(pick(None).as_deref(), Some("Axe"));
         assert_eq!(pick(Some("Swordman")).as_deref(), Some("Axe"));
         assert_eq!(pick(Some("Acolyte")).as_deref(), Some("Club"));

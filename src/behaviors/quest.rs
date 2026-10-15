@@ -48,6 +48,20 @@ fn shown_name(name: &str) -> &str {
     name.split('#').next().unwrap_or(name).trim()
 }
 
+/// A walk to a cell, and the dialogs that may come up on the way.
+struct Walk<'a> {
+    map: &'a str,
+    to: (u16, u16),
+    /// The walk stays in this area (anywhere without one).
+    area: Option<Area>,
+    /// Menu entries to pick, of those that speak up on the way.
+    menu: &'a [&'a str],
+    /// Quiz answers, of those that speak up on the way.
+    answers: &'a [(&'a str, &'a str)],
+    /// What the walk is for: the goal of a dialog on the way.
+    what: &'a str,
+}
+
 impl Bot {
     /// Does the next stage of a quest. The bot stands on the stage's map (the plan travelled there).
     pub async fn quest_step(&mut self, id: &str) -> Result<Outcome> {
@@ -97,8 +111,15 @@ impl Bot {
                 menu,
                 answers,
             } => {
-                self.quest_walk(map, (*x, *y), stage.area, menu, answers, stage.what)
-                    .await?
+                let walk = Walk {
+                    map,
+                    to: (*x, *y),
+                    area: stage.area,
+                    menu,
+                    answers,
+                    what: stage.what,
+                };
+                self.quest_walk(walk).await?
             }
             Act::Room { map, npc } => self.quest_room(map, npc).await?,
             Act::Dance(dance) => self.quest_dance(dance).await?,
@@ -109,9 +130,12 @@ impl Bot {
         if let Act::Talk(talk) = &stage.act
             && !talk.assigns.is_empty()
         {
-            let names = self
-                .item_names(talk.assigns.iter().flat_map(|s| s.iter().map(|(i, _)| *i)))
-                .await;
+            let ids: Vec<u32> = talk
+                .assigns
+                .iter()
+                .flat_map(|s| s.iter().map(|(i, _)| *i))
+                .collect();
+            let names = self.item_names(&ids).await;
             if let Some(set) = assigned_set(talk.assigns, &said, |i| names.get(&i).cloned()) {
                 let list: Vec<String> = set
                     .iter()
@@ -183,9 +207,11 @@ impl Bot {
         })
     }
 
-    async fn item_names(&self, ids: impl Iterator<Item = u32>) -> HashMap<u32, String> {
+    /// Takes a slice, not an iterator: an iterator of closures held across the awaits keeps rustc from seeing the
+    /// bot's future is `Send`.
+    async fn item_names(&self, ids: &[u32]) -> HashMap<u32, String> {
         let mut names = HashMap::new();
-        for id in ids {
+        for &id in ids {
             if let Ok(item) = self.knowledge.db.item(id).await {
                 names.insert(id, item.name_english);
             }
@@ -431,15 +457,15 @@ impl Bot {
     }
 
     /// Walks to a cell without fighting, a short way at a time so potions keep the bot alive among monsters.
-    async fn quest_walk(
-        &mut self,
-        map: &str,
-        to: (u16, u16),
-        area: Option<Area>,
-        menu: &[&str],
-        answers: &[(&str, &str)],
-        what: &str,
-    ) -> Result<Outcome> {
+    async fn quest_walk(&mut self, walk: Walk<'_>) -> Result<Outcome> {
+        let Walk {
+            map,
+            to,
+            area,
+            menu,
+            answers,
+            what,
+        } = walk;
         let start = Instant::now();
         while start.elapsed() < TEST_TIMEOUT {
             let obs = self.observe().await?;

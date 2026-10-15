@@ -26,3 +26,4 @@ rustc-ice-*.txt
 # Bot runtime data
 /cache/
 /state/
+/logs

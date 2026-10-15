@@ -13,7 +13,7 @@ use crate::api::observation::Warp;
 use crate::api::{Action, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::state::HP_LOW;
-use crate::knowledge::graph::Edge;
+use crate::knowledge::graph::{Edge, Trip};
 use crate::knowledge::grounds::lethal_monster;
 use crate::knowledge::talks::shown_name;
 
@@ -220,14 +220,11 @@ impl Bot {
             let route = self
                 .knowledge
                 .graph
-                .route_into(
-                    &obs.map.name,
-                    obs.me.region,
-                    map,
-                    Some(region),
-                    &avoid,
-                    &skip,
-                    0,
+                .route_for(
+                    Trip::new(&obs.map.name, map, &avoid)
+                        .starting_in(obs.me.region)
+                        .ending_in(Some(region))
+                        .skipping(&skip),
                 )
                 .await?;
             let Some(edge) = route.as_ref().and_then(|r| r.first()) else {
@@ -385,11 +382,9 @@ impl Bot {
                     .knowledge
                     .graph
                     .route_paying(
-                        &here,
-                        obs.me.region,
-                        target,
-                        &around,
-                        &leg_skip,
+                        Trip::new(&here, target, &around)
+                            .starting_in(obs.me.region)
+                            .skipping(&leg_skip),
                         obs.me.zeny,
                     )
                     .await?
@@ -418,7 +413,12 @@ impl Bot {
                 route = self
                     .knowledge
                     .graph
-                    .route_paying(&here, obs.me.region, target, &avoid, &leg_skip, obs.me.zeny)
+                    .route_paying(
+                        Trip::new(&here, target, &avoid)
+                            .starting_in(obs.me.region)
+                            .skipping(&leg_skip),
+                        obs.me.zeny,
+                    )
                     .await?;
             }
             let Some(mut route) = route else {

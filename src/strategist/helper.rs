@@ -10,7 +10,7 @@ use crate::social::Ask;
 use crate::voice::known::Known;
 use crate::voice::phrase::Phrase;
 use crate::voice::systemone::{Question, SystemOne};
-use crate::voice::{Voice, compose, state_of};
+use crate::voice::{Brief, Voice, compose, state_of};
 
 #[derive(Clone)]
 pub struct Helper {
@@ -356,11 +356,13 @@ Conversation with {from} ({}), oldest first (\"you\" is {me}):
     }
     let message = compose(
         s1,
-        &state,
-        &format!("answer {from}'s last line"),
-        &context.known.candidates(),
-        None,
-        true,
+        Brief {
+            state: &state,
+            purpose: &format!("answer {from}'s last line"),
+            candidates: &context.known.candidates(),
+            only: None,
+            quiet: true,
+        },
     )
     .await?;
     Ok(ChatTurn {

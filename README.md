@@ -45,20 +45,25 @@ running. **The model is optional:** without one, bots play with the rules alone.
 A new character starts as a level 1 Novice in the training grounds, exactly like a new player.
 
 Change `../rust-ro/config/bots_api_key.txt` to wherever your server keeps its key. Instead of `--key-file`, you can set
-`BOT_API_KEY_FILE`.
+`BOT_API_KEY_FILE`. Without either, the bot reads `../rust-ro/config/bots_api_key.txt`, the key of a rust-ro checked out
+next to this repo.
 
-## Running several bots
+## Running many bots
 
-Run one process per bot, each with its own `--name`:
+`run` without `--name` plays many bots in one process, named by the first lines of `names.txt`. A name without a
+character gets one made; a name with one logs in and plays on where it left off. With no command at all, the bot runs
+`run`, so from this repo:
 
 ```sh
-KEY=../rust-ro/config/bots_api_key.txt
-for name in Alfie Brannoc Cormac Delyth; do
-  ./target/release/rust-ro-bot --key-file $KEY --name $name run --no-llm --minutes 60 > $name.log 2>&1 &
-done
-wait
+cargo run --release                                    # 50 bots, the decision model as their voice
+cargo run --release -- --bots 10 --minutes 30 --log-dir logs
 ```
 
+- `--bots N` sets how many (default 50). The bots join `--join-gap` seconds apart (default 3).
+- `--log-dir <dir>` writes each bot's log to `<dir>/<name>.log`. Without it, every line in the terminal names its bot.
+- Ctrl+C stops them all after their current step, each with its report.
+- `names.txt` holds 640 names. `python tools/names.py 1000` adds made-up names up to 1000, after the ones already
+  there. `--names <file>` reads another list.
 - The server lets 20 bots in at once by default. For more, raise `bots.max_bots` in the server's `config.json` and
   restart the server:
 
@@ -69,7 +74,8 @@ wait
 - Names need at least 4 characters (`char_server.char_name_min_length`) and at most 19.
 - A bot without `--party` looks for a party on the booking board and joins one, as a player would. Use `--solo` to keep
   it alone.
-- To form a party yourself, give the leader `--lead`. Give every member the same `--party` and `--friends`:
+- To form a party yourself, run one process per member with `--name`. Give the leader `--lead`, and every member the
+  same `--party` and `--friends`:
 
   ```sh
   rust-ro-bot --key-file $KEY --name Alfie run --party Wayfarers --friends Alfie,Brannoc --lead
@@ -83,7 +89,7 @@ wait
 | Command | What it does |
 |---|---|
 | `probe` | Creates and connects the character, prints a summary of what it sees. |
-| `run` | Plays. See the options below. |
+| `run` | Plays, one bot with `--name` or `--bots` bots from `names.txt`. The command when none is given. See the options below. |
 | `travel <map>...` | Walks the character to each map in turn, the way a goal's trip goes, and prints how each trip ended. |
 | `db <path>` | Prints a `/db` entry of the reference, such as `db maps/prt_fild08`. |
 | `db grounds <map>` | Lists the hunting grounds the bot would consider from a map. |
@@ -94,11 +100,15 @@ Options of `run`:
 
 | Option | Meaning |
 |---|---|
+| `--bots N` | Bots to play without `--name` (default 50). |
+| `--names <file>` | The bot names, one per line (default `names.txt`). |
+| `--join-gap S` | Seconds between two bots joining (default 3). |
+| `--log-dir <dir>` | Each bot's log in `<dir>/<name>.log`. |
 | `--minutes N` | Stop after N minutes. |
 | `--until-level N` | Stop at base level N. |
 | `--no-llm` | No language model: the rules pick every goal, and the bot doesn't chat or visit the forum. |
-| `--llm-share F` | Share of goal choices given to the model, from 0 to 1 (default 1). |
-| `--voice llm\|system-one` | Which model talks and picks goals (see [Language models](#language-models)). |
+| `--llm-share F` | Share of goal choices given to the model, from 0 to 1 (default 0.25 with `system-one`, 1 with `llm`). |
+| `--voice system-one\|llm` | Which model talks and picks goals (default `system-one`, see [Language models](#language-models)). |
 | `--job <Job>` | Head for this job, first or second (`Hunter` goes through Archer). It also sets the stat build. |
 | `--party`, `--friends`, `--lead`, `--role`, `--solo` | Party play (see above). |
 | `--no-forum` | Never visit the players' forum. |
@@ -107,7 +117,7 @@ Global options work with every command:
 
 | Option | Default |
 |---|---|
-| `--name` | `Rusty` |
+| `--name` | none for `run` (it plays `--bots` bots), `Rusty` for the other commands |
 | `--url`, or `BOT_API_URL` | `http://127.0.0.1:6902` |
 | `--db-url`, or `BOT_DB_URL` | `http://127.0.0.1:6904` |
 | `--llm-url`, or `BOT_LLM_URL` | `http://127.0.0.1:8080` |
@@ -116,13 +126,15 @@ Global options work with every command:
 
 ## Language models
 
-**`--voice llm` (the default)** uses an OpenAI-compatible llama.cpp server at `--llm-url`. The model picks a share of
-the goals, answers players in chat and writes on the forum. Small models do: the bot was tuned with LFM2.5-2.6B. The
-bot limits the model's thinking to 2048 tokens (`--llm-think`, 0 turns it off). If the server doesn't answer, the bot
-says so in its log and plays with the rules.
+**`--voice system-one` (the default)** uses a decision model, served by a llama.cpp build with the `/v1/systemone`
+endpoint at `--s1-url` (default `http://127.0.0.1:9931`). It picks options and catalogue sentences instead of writing
+free text, and picks a quarter of the goals (`--llm-share 0.25`). If it doesn't answer, the bot says so in its log and
+plays with the rules, without chat.
 
-**`--voice system-one`** uses a decision model, served by a llama.cpp build with the `/v1/systemone` endpoint at
-`--s1-url`. It picks options and catalogue sentences instead of writing free text. Use it with `--llm-share 0.25`.
+**`--voice llm`** uses an OpenAI-compatible llama.cpp server at `--llm-url`. The model picks the goals (`--llm-share`
+1), answers players in chat and writes on the forum. Small models do: the bot was tuned with LFM2.5-2.6B. The bot
+limits the model's thinking to 2048 tokens (`--llm-think`, 0 turns it off). If the server doesn't answer, the bot says
+so in its log and plays with the rules.
 
 ## What the bot keeps
 

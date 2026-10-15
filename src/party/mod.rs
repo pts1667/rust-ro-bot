@@ -22,7 +22,8 @@ use crate::api::{Action, Observation, Party, PartyMember, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::Goal;
 use crate::goap::state::HP_LOW;
-use crate::knowledge::grounds::{lethal_monster, safe_hops};
+use crate::knowledge::graph::Trip;
+use crate::knowledge::grounds::{Hunt, lethal_monster};
 use chat::Said;
 
 /// How far a character sees around itself, in cells.
@@ -658,21 +659,20 @@ impl Bot {
             .chain(self.recent_deadly_ways().into_iter().filter(|m| m != map))
             .collect();
         let mut lethal = HashMap::new();
-        let (db, graph) = (&self.knowledge.db, &self.knowledge.graph);
-        let hops = safe_hops(db, graph, &fighter, &obs.map.name, map, &avoid, &mut lethal).await?;
-        let deadly_there = lethal_monster(db, map, &fighter).await;
+        let hops = Hunt::new(&self.knowledge, &fighter, &obs.map.name, FOLLOW_HOPS)
+            .avoiding_maps(&avoid)
+            .safe_hops(map, &mut lethal)
+            .await?;
+        let deadly_there = lethal_monster(&self.knowledge.db, map, &fighter).await;
         let ok = hops.is_some_and(|h| h <= FOLLOW_HOPS) && deadly_there.is_none();
         if !ok {
             // No safe way (every way crosses a deadly map) and no way at all look the same in the hops: say which
             let reachable = self
                 .knowledge
                 .graph
-                .route_skipping(
-                    &obs.map.name,
-                    obs.me.region,
-                    map,
-                    &std::collections::HashSet::new(),
-                    &std::collections::HashSet::new(),
+                .route_for(
+                    Trip::new(&obs.map.name, map, &std::collections::HashSet::new())
+                        .starting_in(obs.me.region),
                 )
                 .await?
                 .is_some();

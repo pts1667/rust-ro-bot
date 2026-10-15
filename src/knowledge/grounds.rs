@@ -1,12 +1,13 @@
 //! Hunting grounds: maps near the bot ranked by the experience it can safely make there.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use anyhow::Result;
 
+use super::Knowledge;
 use super::combat::{Fighter, SAFE_DANGER};
 use super::db::{Db, ItemData, MapData, MobData};
-use super::graph::WorldGraph;
 
 #[derive(Debug, Clone)]
 pub struct Ground {
@@ -38,6 +39,58 @@ impl Ground {
             self.threat * 100.0,
             mobs.join(", ")
         )
+    }
+}
+
+/// What a search for hunting grounds is asked: who hunts, from where, how far it goes and what it keeps away from.
+#[derive(Clone, Copy)]
+pub struct Hunt<'a> {
+    pub knowledge: &'a Knowledge,
+    pub fighter: &'a Fighter,
+    /// The map the bot is on.
+    pub from: &'a str,
+    /// Most warps to a ground.
+    pub max_hops: u32,
+    /// Maps not to hunt on or cross.
+    pub avoid_maps: &'a HashSet<String>,
+    /// Monsters not to fight.
+    pub avoid_mobs: &'a HashSet<String>,
+}
+
+static NOTHING: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
+
+impl<'a> Hunt<'a> {
+    /// `fighter` hunting within `max_hops` warps of `from`, avoiding nothing.
+    pub fn new(
+        knowledge: &'a Knowledge,
+        fighter: &'a Fighter,
+        from: &'a str,
+        max_hops: u32,
+    ) -> Self {
+        Self {
+            knowledge,
+            fighter,
+            from,
+            max_hops,
+            avoid_maps: &NOTHING,
+            avoid_mobs: &NOTHING,
+        }
+    }
+
+    /// Keeping off the maps of `maps`.
+    pub fn avoiding_maps(self, maps: &'a HashSet<String>) -> Self {
+        Self {
+            avoid_maps: maps,
+            ..self
+        }
+    }
+
+    /// Leaving the monsters of `mobs` alone.
+    pub fn avoiding_mobs(self, mobs: &'a HashSet<String>) -> Self {
+        Self {
+            avoid_mobs: mobs,
+            ..self
+        }
     }
 }
 
@@ -140,184 +193,187 @@ pub async fn lethal_monster(db: &Db, map: &str, fighter: &Fighter) -> Option<Str
     None
 }
 
-/// Warps from `from` to `to` on a way that crosses no map with an aggressive monster able to kill the bot in two
-/// hits (the destination itself is judged by `score_map`). None when every way crosses one. `lethal` caches the maps
-/// judged.
-pub async fn safe_hops(
-    db: &Db,
-    graph: &WorldGraph,
-    fighter: &Fighter,
-    from: &str,
-    to: &str,
-    avoid_maps: &HashSet<String>,
-    lethal: &mut HashMap<String, bool>,
-) -> Result<Option<u32>> {
-    if from == to {
-        return Ok(Some(0));
-    }
-    let mut around = avoid_maps.clone();
-    for _ in 0..5 {
-        let Some(route) = graph.route(from, to, &around).await? else {
-            return Ok(None);
-        };
-        let mut crossed = false;
-        for map in route.iter().map(|e| e.to.as_str()).filter(|m| *m != to) {
-            let deadly = match lethal.get(map) {
-                Some(d) => *d,
-                None => {
-                    let d = lethal_monster(db, map, fighter).await.is_some();
-                    lethal.insert(map.to_owned(), d);
-                    d
-                }
+impl Hunt<'_> {
+    /// Warps from `from` to `to` on a way that crosses no map with an aggressive monster able to kill the bot in two
+    /// hits (the destination itself is judged by `score_map`). None when every way crosses one. `lethal` caches the maps
+    /// judged.
+    pub async fn safe_hops(
+        &self,
+        to: &str,
+        lethal: &mut HashMap<String, bool>,
+    ) -> Result<Option<u32>> {
+        let Hunt {
+            knowledge,
+            fighter,
+            from,
+            avoid_maps,
+            ..
+        } = *self;
+        let (db, graph) = (&knowledge.db, &knowledge.graph);
+        if from == to {
+            return Ok(Some(0));
+        }
+        let mut around = avoid_maps.clone();
+        for _ in 0..5 {
+            let Some(route) = graph.route(from, to, &around).await? else {
+                return Ok(None);
             };
-            if deadly {
-                around.insert(map.to_owned());
-                crossed = true;
+            let mut crossed = false;
+            for map in route.iter().map(|e| e.to.as_str()).filter(|m| *m != to) {
+                let deadly = match lethal.get(map) {
+                    Some(d) => *d,
+                    None => {
+                        let d = lethal_monster(db, map, fighter).await.is_some();
+                        lethal.insert(map.to_owned(), d);
+                        d
+                    }
+                };
+                if deadly {
+                    around.insert(map.to_owned());
+                    crossed = true;
+                }
+            }
+            if !crossed {
+                return Ok(Some(route.len() as u32));
             }
         }
-        if !crossed {
-            return Ok(Some(route.len() as u32));
-        }
+        Ok(None)
     }
-    Ok(None)
-}
 
-/// Where to hunt for an item: the map within `max_hops` warps, reached without crossing a deadly map, where the bot can
-/// safely fight what drops it, ranked by drop chance, spawns and distance. The ground and the monster.
-pub async fn farm_ground(
-    db: &Db,
-    graph: &WorldGraph,
-    fighter: &Fighter,
-    from: &str,
-    item: &ItemData,
-    max_hops: u32,
-    avoid_maps: &HashSet<String>,
-    avoid_mobs: &HashSet<String>,
-) -> Result<Option<(Ground, String)>> {
-    // Every monster that drops it, on the maps within reach: the best droppers often live far away (Red Herb:
-    // Permeter, Goblin), and the near Lunatic was left out when only the eight best were looked at.
-    let near: HashMap<String, u32> = graph
-        .neighbourhood(from, max_hops)
-        .await?
-        .into_iter()
-        .collect();
-    let mut best: Option<(f32, Ground, String)> = None;
-    let mut lethal = HashMap::new();
-    let mut safe: HashMap<String, Option<u32>> = HashMap::new();
-    for drop in item.dropped_by.iter().filter(|d| !d.mvp && d.rate > 0) {
-        let Some(id) = drop.mob.id_u32() else {
-            continue;
-        };
-        let Ok(mob) = db.mob(id).await else { continue };
-        for spawn in mob
-            .spawns
-            .iter()
-            .filter(|s| s.kind != "boss" && s.amount > 0)
-        {
-            let name = spawn.map.id_str();
-            if avoid_maps.contains(&name)
-                || !is_hunting_map_name(&name)
-                || !near.contains_key(&name)
-            {
+    /// Where to hunt for an item: the map within `max_hops` warps, reached without crossing a deadly map, where the bot can
+    /// safely fight what drops it, ranked by drop chance, spawns and distance. The ground and the monster.
+    pub async fn farm_ground(&self, item: &ItemData) -> Result<Option<(Ground, String)>> {
+        let Hunt {
+            knowledge,
+            fighter,
+            from,
+            max_hops,
+            avoid_maps,
+            avoid_mobs,
+        } = *self;
+        let (db, graph) = (&knowledge.db, &knowledge.graph);
+        // Every monster that drops it, on the maps within reach: the best droppers often live far away (Red Herb:
+        // Permeter, Goblin), and the near Lunatic was left out when only the eight best were looked at.
+        let near: HashMap<String, u32> = graph
+            .neighbourhood(from, max_hops)
+            .await?
+            .into_iter()
+            .collect();
+        let mut best: Option<(f32, Ground, String)> = None;
+        let mut lethal = HashMap::new();
+        let mut safe: HashMap<String, Option<u32>> = HashMap::new();
+        for drop in item.dropped_by.iter().filter(|d| !d.mvp && d.rate > 0) {
+            let Some(id) = drop.mob.id_u32() else {
                 continue;
-            }
-            let hops = match safe.get(&name) {
-                Some(hops) => *hops,
-                None => {
-                    let hops =
-                        safe_hops(db, graph, fighter, from, &name, avoid_maps, &mut lethal).await?;
-                    safe.insert(name.clone(), hops);
-                    hops
-                }
             };
-            let Some(hops) = hops else { continue };
-            if hops > max_hops {
+            let Ok(mob) = db.mob(id).await else { continue };
+            for spawn in mob
+                .spawns
+                .iter()
+                .filter(|s| s.kind != "boss" && s.amount > 0)
+            {
+                let name = spawn.map.id_str();
+                if avoid_maps.contains(&name)
+                    || !is_hunting_map_name(&name)
+                    || !near.contains_key(&name)
+                {
+                    continue;
+                }
+                let hops = match safe.get(&name) {
+                    Some(hops) => *hops,
+                    None => {
+                        let hops = self.safe_hops(&name, &mut lethal).await?;
+                        safe.insert(name.clone(), hops);
+                        hops
+                    }
+                };
+                let Some(hops) = hops else { continue };
+                if hops > max_hops {
+                    continue;
+                }
+                let Ok(map) = db.map(&name).await else {
+                    continue;
+                };
+                let mut mobs = Vec::new();
+                for s in &map.mob_spawns {
+                    if let Some(id) = s.mob.id_u32()
+                        && let Ok(m) = db.mob(id).await
+                    {
+                        mobs.push(m);
+                    }
+                }
+                let Some(ground) = score_map(&map, &mobs, fighter, hops, avoid_mobs) else {
+                    continue;
+                };
+                if !ground
+                    .targets
+                    .iter()
+                    .any(|(n, _, _)| *n == mob.name_english)
+                {
+                    continue;
+                }
+                // Every warp is a walk across a map: a few items take less time on a poorer map near by
+                let value = drop.rate as f32 * spawn.amount as f32 / (1.0 + hops as f32);
+                if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
+                    best = Some((value, ground, mob.name_english.clone()));
+                }
+            }
+        }
+        Ok(best.map(|(_, g, m)| (g, m)))
+    }
+
+    /// The best grounds within `max_hops` warps of `from`, on a way that crosses no deadly map (`safe_hops`): the score
+    /// of mjo_dun01 said threat 0%, and five bots died on mjolnir_02 on the way.
+    pub async fn hunting_grounds(&self, limit: usize) -> Result<Vec<Ground>> {
+        let Hunt {
+            knowledge,
+            fighter,
+            from,
+            max_hops,
+            avoid_maps,
+            avoid_mobs,
+        } = *self;
+        let (db, graph) = (&knowledge.db, &knowledge.graph);
+        let mut grounds = Vec::new();
+        let mut lethal = HashMap::new();
+        for (name, _) in graph.neighbourhood(from, max_hops).await? {
+            if avoid_maps.contains(&name) || !is_hunting_map_name(&name) {
                 continue;
             }
             let Ok(map) = db.map(&name).await else {
                 continue;
             };
-            let mut mobs = Vec::new();
-            for s in &map.mob_spawns {
-                if let Some(id) = s.mob.id_u32()
-                    && let Ok(m) = db.mob(id).await
-                {
-                    mobs.push(m);
-                }
+            if map.is_town()
+                || map.mob_spawns.is_empty()
+                || map
+                    .flags
+                    .iter()
+                    .any(|f| f == "pvp" || f == "gvg" || f == "battleground")
+            {
+                continue;
             }
-            let Some(ground) = score_map(&map, &mobs, fighter, hops, avoid_mobs) else {
+            let Some(hops) = self.safe_hops(&name, &mut lethal).await? else {
                 continue;
             };
-            if !ground
-                .targets
-                .iter()
-                .any(|(n, _, _)| *n == mob.name_english)
-            {
+            if hops > max_hops {
                 continue;
             }
-            // Every warp is a walk across a map: a few items take less time on a poorer map near by
-            let value = drop.rate as f32 * spawn.amount as f32 / (1.0 + hops as f32);
-            if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
-                best = Some((value, ground, mob.name_english.clone()));
+            let mut mobs = Vec::new();
+            for spawn in &map.mob_spawns {
+                if let Some(id) = spawn.mob.id_u32()
+                    && let Ok(mob) = db.mob(id).await
+                {
+                    mobs.push(mob);
+                }
+            }
+            if let Some(g) = score_map(&map, &mobs, fighter, hops, avoid_mobs) {
+                grounds.push(g);
             }
         }
+        grounds.sort_by(|a, b| b.score.total_cmp(&a.score));
+        grounds.truncate(limit);
+        Ok(grounds)
     }
-    Ok(best.map(|(_, g, m)| (g, m)))
-}
-
-/// The best grounds within `max_hops` warps of `from`, on a way that crosses no deadly map (`safe_hops`): the score
-/// of mjo_dun01 said threat 0%, and five bots died on mjolnir_02 on the way.
-pub async fn hunting_grounds(
-    db: &Db,
-    graph: &WorldGraph,
-    fighter: &Fighter,
-    from: &str,
-    max_hops: u32,
-    avoid_maps: &HashSet<String>,
-    avoid_mobs: &HashSet<String>,
-    limit: usize,
-) -> Result<Vec<Ground>> {
-    let mut grounds = Vec::new();
-    let mut lethal = HashMap::new();
-    for (name, _) in graph.neighbourhood(from, max_hops).await? {
-        if avoid_maps.contains(&name) || !is_hunting_map_name(&name) {
-            continue;
-        }
-        let Ok(map) = db.map(&name).await else {
-            continue;
-        };
-        if map.is_town()
-            || map.mob_spawns.is_empty()
-            || map
-                .flags
-                .iter()
-                .any(|f| f == "pvp" || f == "gvg" || f == "battleground")
-        {
-            continue;
-        }
-        let Some(hops) =
-            safe_hops(db, graph, fighter, from, &name, avoid_maps, &mut lethal).await?
-        else {
-            continue;
-        };
-        if hops > max_hops {
-            continue;
-        }
-        let mut mobs = Vec::new();
-        for spawn in &map.mob_spawns {
-            if let Some(id) = spawn.mob.id_u32()
-                && let Ok(mob) = db.mob(id).await
-            {
-                mobs.push(mob);
-            }
-        }
-        if let Some(g) = score_map(&map, &mobs, fighter, hops, avoid_mobs) {
-            grounds.push(g);
-        }
-    }
-    grounds.sort_by(|a, b| b.score.total_cmp(&a.score));
-    grounds.truncate(limit);
-    Ok(grounds)
 }
 
 #[cfg(test)]

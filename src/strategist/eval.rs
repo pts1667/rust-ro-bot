@@ -8,7 +8,7 @@ use anyhow::Result;
 use super::options::Opt;
 use super::prompt::{Order, render_turn};
 use super::skill_state::StrategicState;
-use super::{Snapshot, llm::Llm, llm_turn};
+use super::{Snapshot, Step, llm::Llm, llm_turn};
 use crate::goap::Goal;
 use crate::knowledge::Knowledge;
 
@@ -196,7 +196,13 @@ pub async fn run(llm: &Llm, knowledge: &Knowledge, orders: &[Order], n: usize) -
                     &super::prompt::options_text(&options),
                 );
                 let start = Instant::now();
-                let pick = match llm_turn(&llm, knowledge, &snap, &options, user).await {
+                let step = Step {
+                    llm: &llm,
+                    knowledge,
+                    snap: &snap,
+                    options: &options,
+                };
+                let pick = match llm_turn(step, user).await {
                     Ok(d) => {
                         let mut state: StrategicState = serde_json::from_str(s.state)?;
                         if !state.apply_patch(&d.patch).rejected.is_empty() {

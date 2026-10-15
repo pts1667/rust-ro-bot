@@ -1,7 +1,7 @@
 //! The map graph made of the warps of `/db/maps/<name>`, and routes through it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use anyhow::Result;
 
@@ -51,6 +51,54 @@ impl Edge {
     }
 }
 
+/// What a route search is asked: between which maps and parts of them, keeping off which maps and warps.
+#[derive(Debug, Clone, Copy)]
+pub struct Trip<'a> {
+    pub from: &'a str,
+    /// The part of `from` the bot stands in (`None` for any). Parts of a map count: a warp in a room the bot cannot
+    /// walk to is no way out, and the floors of a tower are reached through its own warps.
+    pub region: Option<u32>,
+    pub to: &'a str,
+    /// The part of `to` to get into (`None` for any): a room of an interior map the bot gets to only through another
+    /// door of the town outside.
+    pub to_region: Option<u32>,
+    /// Maps not to cross (`to` itself excepted).
+    pub avoid: &'a HashSet<String>,
+    /// Warps left out (keys of `Edge::key`).
+    pub skip: &'a HashSet<String>,
+}
+
+static NO_WARPS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
+
+impl<'a> Trip<'a> {
+    /// From any part of `from` to any part of `to`, avoiding the maps of `avoid`.
+    pub fn new(from: &'a str, to: &'a str, avoid: &'a HashSet<String>) -> Self {
+        Self {
+            from,
+            region: None,
+            to,
+            to_region: None,
+            avoid,
+            skip: &NO_WARPS,
+        }
+    }
+
+    /// From the part `region` of `from`.
+    pub fn starting_in(self, region: Option<u32>) -> Self {
+        Self { region, ..self }
+    }
+
+    /// Into the part `to_region` of `to`.
+    pub fn ending_in(self, to_region: Option<u32>) -> Self {
+        Self { to_region, ..self }
+    }
+
+    /// Leaving out the warps of `skip`.
+    pub fn skipping(self, skip: &'a HashSet<String>) -> Self {
+        Self { skip, ..self }
+    }
+}
+
 /// Where a search stands: a map, and the part of it when known.
 type Node = (String, Option<u32>);
 
@@ -73,6 +121,15 @@ impl WorldGraph {
             db,
             bad: Default::default(),
             known: Default::default(),
+        }
+    }
+
+    /// The same graph, with no warps left out: for another bot, which has its own.
+    pub fn with_own_bans(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            bad: Default::default(),
+            known: self.known.clone(),
         }
     }
 
@@ -214,45 +271,22 @@ impl WorldGraph {
         to: &str,
         avoid: &HashSet<String>,
     ) -> Result<Option<Vec<Edge>>> {
-        self.route_skipping(from, None, to, avoid, &HashSet::new())
-            .await
+        self.route_for(Trip::new(from, to, avoid)).await
     }
 
-    /// `route` from the part `region` of `from` (where the bot stands; `None` for any), also leaving out the warps of
-    /// `skip` (keys of `Edge::key`). Parts of a map count: a warp in a room the bot cannot walk to is no way out, and
-    /// the floors of a tower are reached through its own warps.
-    pub async fn route_skipping(
-        &self,
-        from: &str,
-        region: Option<u32>,
-        to: &str,
-        avoid: &HashSet<String>,
-        skip: &HashSet<String>,
-    ) -> Result<Option<Vec<Edge>>> {
-        self.route_into(from, region, to, None, avoid, skip, 0)
-            .await
+    /// Fewest-warps route of `trip`, by free ways only.
+    pub async fn route_for(&self, trip: Trip<'_>) -> Result<Option<Vec<Edge>>> {
+        self.search(trip, 0).await
     }
 
-    /// `route_skipping` for a bot with `zeny`: a Kafra teleport where nothing else leads there, or where it saves
+    /// `route_for` for a bot with `zeny`: a Kafra teleport where nothing else leads there, or where it saves
     /// `FARE_SAVES` warps or more.
-    pub async fn route_paying(
-        &self,
-        from: &str,
-        region: Option<u32>,
-        to: &str,
-        avoid: &HashSet<String>,
-        skip: &HashSet<String>,
-        zeny: u64,
-    ) -> Result<Option<Vec<Edge>>> {
-        let free = self
-            .route_into(from, region, to, None, avoid, skip, 0)
-            .await?;
+    pub async fn route_paying(&self, trip: Trip<'_>, zeny: u64) -> Result<Option<Vec<Edge>>> {
+        let free = self.search(trip, 0).await?;
         if zeny == 0 {
             return Ok(free);
         }
-        let paid = self
-            .route_into(from, region, to, None, avoid, skip, zeny)
-            .await?;
+        let paid = self.search(trip, zeny).await?;
         Ok(match (free, paid) {
             (Some(free), Some(paid)) if free.len() >= paid.len() + FARE_SAVES => Some(paid),
             (None, paid) => paid,
@@ -260,18 +294,16 @@ impl WorldGraph {
         })
     }
 
-    /// `route_skipping` into the part `to_region` of `to` (any part for `None`): a room of an interior map the bot
-    /// gets to only through another door of the town outside. Paid ways cost `budget` zeny at most each.
-    pub async fn route_into(
-        &self,
-        from: &str,
-        region: Option<u32>,
-        to: &str,
-        to_region: Option<u32>,
-        avoid: &HashSet<String>,
-        skip: &HashSet<String>,
-        budget: u64,
-    ) -> Result<Option<Vec<Edge>>> {
+    /// The route of `trip`, by paid ways of `budget` zeny at most each besides the free ones.
+    async fn search(&self, trip: Trip<'_>, budget: u64) -> Result<Option<Vec<Edge>>> {
+        let Trip {
+            from,
+            region,
+            to,
+            to_region,
+            avoid,
+            skip,
+        } = trip;
         let arrived = |map: &str, part: Option<u32>| {
             map == to && (to_region.is_none() || part.is_none() || part == to_region)
         };
@@ -548,7 +580,7 @@ mod tests {
             let g = g.clone();
             let none = none.clone();
             async move {
-                g.route_paying("morocc", None, "prontera", &none, &none, zeny)
+                g.route_paying(Trip::new("morocc", "prontera", &none), zeny)
                     .await
                     .unwrap()
             }
@@ -564,7 +596,7 @@ mod tests {
         maps[1].1.push(warp(21, 1, "field", 1));
         let g = cache(&maps, "kafra2");
         let walk = g
-            .route_paying("desert", None, "prontera", &none, &none, 5000)
+            .route_paying(Trip::new("desert", "prontera", &none), 5000)
             .await
             .unwrap()
             .unwrap();
@@ -729,13 +761,7 @@ mod tests {
         assert_eq!(steps, want);
         // Standing on part 8 already
         let route = g
-            .route_skipping(
-                "tower",
-                Some(8),
-                "dungeon",
-                &HashSet::new(),
-                &HashSet::new(),
-            )
+            .route_for(Trip::new("tower", "dungeon", &HashSet::new()).starting_in(Some(8)))
             .await
             .unwrap()
             .unwrap();
@@ -747,27 +773,19 @@ mod tests {
         // Out of the tower's part 9 to the town, and back in: no warp inside the tower leads from 6 to 9
         let g = world();
         let route = g
-            .route_into(
-                "tower",
-                Some(6),
-                "tower",
-                Some(9),
-                &HashSet::new(),
-                &HashSet::new(),
-                0,
+            .route_for(
+                Trip::new("tower", "tower", &HashSet::new())
+                    .starting_in(Some(6))
+                    .ending_in(Some(9)),
             )
             .await
             .unwrap();
         assert!(route.is_none(), "part 6 has no warps in this world");
         let route = g
-            .route_into(
-                "dungeon",
-                Some(3),
-                "tower",
-                Some(9),
-                &HashSet::new(),
-                &HashSet::new(),
-                0,
+            .route_for(
+                Trip::new("dungeon", "tower", &HashSet::new())
+                    .starting_in(Some(3))
+                    .ending_in(Some(9)),
             )
             .await
             .unwrap()

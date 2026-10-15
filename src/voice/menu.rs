@@ -165,7 +165,15 @@ impl<'a> Menu<'a> {
                     options.extend(self.extra.iter().cloned());
                     let view = format!("{state}\n\n{}", view(&topics, &left, None));
                     let key = self
-                        .pick(s1, &view, &self.ask_topic, options, TOPIC_TEMPERATURE)
+                        .pick(
+                            s1,
+                            Choice {
+                                state: &view,
+                                ask: &self.ask_topic,
+                                options,
+                                temperature: TOPIC_TEMPERATURE,
+                            },
+                        )
                         .await?;
                     match topics.iter().position(|g| g.key == key) {
                         Some(i) => i,
@@ -200,7 +208,15 @@ impl<'a> Menu<'a> {
             }
             let view = format!("{state}\n\n{}", view(&topics, &left, Some(at)));
             let key = self
-                .pick(s1, &view, &self.ask_sentence, options, SENTENCE_TEMPERATURE)
+                .pick(
+                    s1,
+                    Choice {
+                        state: &view,
+                        ask: &self.ask_sentence,
+                        options,
+                        temperature: SENTENCE_TEMPERATURE,
+                    },
+                )
                 .await?;
             if key == BACK {
                 walk.steps.push(BACK.into());
@@ -220,14 +236,13 @@ impl<'a> Menu<'a> {
         }
     }
 
-    async fn pick(
-        &self,
-        s1: &SystemOne,
-        state: &str,
-        ask: &str,
-        options: Vec<(String, String)>,
-        temperature: f64,
-    ) -> Result<String> {
+    async fn pick(&self, s1: &SystemOne, choice: Choice<'_>) -> Result<String> {
+        let Choice {
+            state,
+            ask,
+            options,
+            temperature,
+        } = choice;
         if !self.best {
             return s1.choose(state, ask, options, temperature).await;
         }
@@ -239,6 +254,14 @@ impl<'a> Menu<'a> {
             .and_then(|a| a.choice.clone())
             .ok_or_else(|| anyhow!("decision model: no choice"))
     }
+}
+
+/// One choice the model makes in a menu: what it reads, the question, the options, and how sharp the draw is.
+struct Choice<'a> {
+    state: &'a str,
+    ask: &'a str,
+    options: Vec<(String, String)>,
+    temperature: f64,
 }
 
 /// The menu as the model reads it: the topics (the open one marked), then its history in this menu, numbered, with
