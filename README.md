@@ -59,7 +59,13 @@ cargo run --release                                    # 50 bots, the decision m
 cargo run --release -- --bots 10 --minutes 30 --log-dir logs
 ```
 
-- `--bots N` sets how many (default 50). The bots join `--join-gap` seconds apart (default 3).
+- `--bots N` sets how many play at once (default 50). The bots join `--join-gap` seconds apart (default 3).
+- The characters take turns, as players come and go. After 30 to 60 minutes of play (`--session 30-60`) a bot logs
+  off in the next town it reaches (or where it is, if no town comes within 20 minutes). It says bye to its party first
+  and leaves a party it found on the booking board. The character of the pool that has rested longest logs in in its
+  place. The pool is the first `--pool`
+  names of `names.txt` (default twice `--bots`, so 100). `--session 0` keeps every bot in the game. With turns,
+  `--minutes` ends the whole run instead of each session.
 - `--log-dir <dir>` writes each bot's log to `<dir>/<name>.log`. Without it, every line in the terminal names its bot.
 - Ctrl+C stops them all after their current step, each with its report.
 - `names.txt` holds 640 names. `python tools/names.py 1000` adds made-up names up to 1000, after the ones already
@@ -104,6 +110,8 @@ Options of `run`:
 | `--names <file>` | The bot names, one per line (default `names.txt`). |
 | `--join-gap S` | Seconds between two bots joining (default 3). |
 | `--log-dir <dir>` | Each bot's log in `<dir>/<name>.log`. |
+| `--session MIN-MAX` | Minutes a bot plays before another character of the pool takes its place (default `30-60`, `0` for never). |
+| `--pool N` | Characters taking turns in the `--bots` places (default twice `--bots`). |
 | `--minutes N` | Stop after N minutes. |
 | `--until-level N` | Stop at base level N. |
 | `--no-llm` | No language model: the rules pick every goal, and the bot doesn't chat or visit the forum. |

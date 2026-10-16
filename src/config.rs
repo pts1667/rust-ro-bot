@@ -2,6 +2,7 @@
 
 use crate::strategist::prompt::Order;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -178,6 +179,13 @@ pub struct RunArgs {
     /// Seconds between two bots joining the game.
     #[arg(long, default_value_t = 3)]
     pub join_gap: u64,
+    /// Minutes a bot plays before it logs off and a resting character of the pool takes its place: `MIN-MAX` for a
+    /// random length in between, or one number. 0 keeps every bot in the game.
+    #[arg(long, default_value = "30-60", value_parser = Session::parse)]
+    pub session: Session,
+    /// Characters taking turns in the `--bots` places, the first names of `--names`. Defaults to twice `--bots`.
+    #[arg(long)]
+    pub pool: Option<usize>,
     /// Write each bot's log to `<dir>/<name>.log` instead of the terminal.
     #[arg(long)]
     pub log_dir: Option<PathBuf>,
@@ -231,7 +239,53 @@ pub struct RunArgs {
     pub job: Option<String>,
 }
 
+/// How long a bot plays before it logs off, in minutes. `max` 0 keeps it in the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Session {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl Session {
+    fn parse(text: &str) -> Result<Self, String> {
+        let number = |t: &str| {
+            t.trim()
+                .parse::<u64>()
+                .map_err(|_| format!("{text:?} is not `MIN-MAX` or a number of minutes"))
+        };
+        let (min, max) = match text.split_once('-') {
+            Some((min, max)) => (number(min)?, number(max)?),
+            None => (number(text)?, number(text)?),
+        };
+        if min > max || (min == 0 && max > 0) {
+            return Err(format!(
+                "{text:?}: a session lasts at least a minute, and MIN comes first"
+            ));
+        }
+        Ok(Self { min, max })
+    }
+
+    /// Whether bots log off at all.
+    pub fn rotates(&self) -> bool {
+        self.max > 0
+    }
+
+    /// A random length within the range.
+    pub fn pick(&self) -> Duration {
+        use rand::Rng;
+        Duration::from_secs(rand::rng().random_range(self.min * 60..=self.max * 60))
+    }
+}
+
 impl RunArgs {
+    /// The characters taking turns: `--pool`, or twice `--bots`, never fewer than `--bots`.
+    pub fn pool_size(&self) -> usize {
+        if !self.session.rotates() {
+            return self.bots;
+        }
+        self.pool.unwrap_or(self.bots * 2).max(self.bots)
+    }
+
     /// `--llm-share`, or its default for the voice.
     pub fn share(&self) -> f32 {
         let default = match self.voice {
@@ -309,5 +363,37 @@ impl Sampling {
         opt("presence_penalty", self.presence_penalty.map(Into::into));
         opt("frequency_penalty", self.frequency_penalty.map(Into::into));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_lengths() {
+        assert_eq!(Session::parse("30-60"), Ok(Session { min: 30, max: 60 }));
+        assert_eq!(Session::parse("45"), Ok(Session { min: 45, max: 45 }));
+        assert!(!Session::parse("0").unwrap().rotates());
+        assert!(Session::parse("60-30").is_err());
+        assert!(Session::parse("0-30").is_err());
+        assert!(Session::parse("half an hour").is_err());
+        let range = Session { min: 30, max: 60 };
+        for _ in 0..100 {
+            let length = range.pick().as_secs();
+            assert!((30 * 60..=60 * 60).contains(&length));
+        }
+    }
+
+    #[test]
+    fn pool_defaults_to_twice_the_bots() {
+        let args = |line: &[&str]| {
+            Cli::try_parse_from([&["rust-ro-bot"], line].concat())
+                .unwrap()
+                .run
+        };
+        assert_eq!(args(&[]).pool_size(), 100);
+        assert_eq!(args(&["--bots", "5", "--pool", "3"]).pool_size(), 5);
+        assert_eq!(args(&["--bots", "5", "--session", "0"]).pool_size(), 5);
     }
 }

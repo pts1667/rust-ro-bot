@@ -24,6 +24,27 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(300);
 /// Failed steps in a row before the goal is given up.
 const MAX_STEP_FAILURES: u32 = 3;
 const SAVE_EVERY: Duration = Duration::from_secs(30);
+/// How long a bot whose session is over plays on to reach a town before it logs off where it is.
+const LEAVE_WITHIN: Duration = Duration::from_secs(20 * 60);
+/// Most warps to the town a bot whose session is over heads for.
+const TOWN_HOPS: u32 = 8;
+/// What a bot says to its party before it logs off.
+const GOODBYES: &[&str] = &[
+    "gotta go, bye all",
+    "logging off, see you",
+    "time for me to go, bye",
+    "that's it for me today, cya",
+    "bye guys, thanks for the party",
+];
+
+/// What ends a run.
+#[derive(Clone, Default)]
+pub struct Stop {
+    /// Ctrl-C or the end of `--minutes`: the bot stops after its current step.
+    pub now: Arc<AtomicBool>,
+    /// The bot's session is over: it plays on until it is in a town, says bye to its party there and logs off.
+    pub in_town: Option<Arc<AtomicBool>>,
+}
 
 /// Carrying capacity in the observation's weight unit (tenths), pre-renewal: job base + 300 per STR.
 pub fn max_weight(job: &str, str: u32) -> u32 {
@@ -76,6 +97,10 @@ struct Run {
     ended_favour: Option<Goal>,
     /// The `ask:<id>` option of the request taken up last.
     taken_ask: String,
+    /// The session is over since then: the bot logs off in the next town.
+    leaving: Option<Instant>,
+    /// The town it heads for to log off, when one is in reach.
+    leave_to: Option<String>,
 }
 
 /// The bot, the strategist's handle and the state of the run: what the loop works on.
@@ -85,8 +110,8 @@ struct Agent {
     run: Run,
 }
 
-/// Plays until `stop` is set (Ctrl-C), the time is up or the level is reached.
-pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Arc<AtomicBool>) -> Result<()> {
+/// Plays until `stop` says so, the time is up or the level is reached.
+pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Stop) -> Result<()> {
     let first = bot.observe().await?;
     let run = Run {
         goal: None,
@@ -104,6 +129,8 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Arc<AtomicBool>)
         ended_favour: None,
         taken_ask: String::new(),
         llm_base: bot.memory.counters.clone(),
+        leaving: None,
+        leave_to: None,
     };
     let started = Instant::now();
     let mut agent = Agent { bot, handle, run };
@@ -115,7 +142,7 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Arc<AtomicBool>)
     );
 
     let result = loop {
-        if stop.load(Ordering::SeqCst) {
+        if stop.now.load(Ordering::SeqCst) {
             break Ok(());
         }
         if args
@@ -147,6 +174,39 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Arc<AtomicBool>)
         if args.until_level.is_some_and(|l| obs.me.base_level >= l) {
             tracing::info!(level = obs.me.base_level, "target level reached");
             break Ok(());
+        }
+        if agent.run.leaving.is_none()
+            && stop
+                .in_town
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::SeqCst))
+        {
+            agent.run.leaving = Some(Instant::now());
+            if !agent.bot.is_town(&obs.map.name).await {
+                agent.run.leave_to = agent.nearest_town(&obs.map.name).await;
+                match &agent.run.leave_to {
+                    Some(town) => {
+                        tracing::info!(%town, "the session is over: logging off in the next town")
+                    }
+                    None => tracing::info!(
+                        "the session is over, no town in reach: logging off in a town on the way, or here within 20 minutes"
+                    ),
+                }
+            }
+        }
+        if let Some(since) = agent.run.leaving
+            && !obs.me.dead
+        {
+            let in_town = agent.bot.is_town(&obs.map.name).await;
+            if in_town || since.elapsed() >= LEAVE_WITHIN {
+                if in_town {
+                    tracing::info!(map = %obs.map.name, "in town: logging off");
+                } else {
+                    tracing::info!(map = %obs.map.name, "no town reached in time: logging off here");
+                }
+                agent.say_goodbye(&obs).await;
+                break Ok(());
+            }
         }
         agent.detect_events(&obs);
         agent.run.prev = Some(obs.clone());
@@ -184,6 +244,58 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Arc<AtomicBool>)
         tracing::warn!(%error, "could not leave the game");
     }
     result
+}
+
+impl Agent {
+    /// The town fewest warps from `from`, within `TOWN_HOPS`.
+    async fn nearest_town(&self, from: &str) -> Option<String> {
+        let maps = self
+            .bot
+            .knowledge
+            .graph
+            .neighbourhood(from, TOWN_HOPS)
+            .await
+            .ok()?;
+        for (map, _) in maps {
+            if self.bot.is_town(&map).await {
+                return Some(map);
+            }
+        }
+        None
+    }
+
+    /// Bye to the party members in the game, then out of a party found on the booking board and its ad off the board:
+    /// the bot will not be back for a while. A party of `--party` waits for it.
+    async fn say_goodbye(&mut self, obs: &Observation) {
+        let others = obs.party.as_ref().is_some_and(|p| {
+            p.members
+                .iter()
+                .any(|m| m.online && !m.name.eq_ignore_ascii_case(&obs.me.name))
+        });
+        if others {
+            use rand::seq::IndexedRandom;
+            let text = GOODBYES
+                .choose(&mut rand::rng())
+                .copied()
+                .unwrap_or("bye")
+                .to_owned();
+            match self.bot.act(Action::PartyChat { text: text.clone() }).await {
+                Ok(_) => tracing::info!(%text, "said to the party"),
+                Err(error) => tracing::debug!(%error, "party chat refused"),
+            }
+            // The words reach the party before the bot is gone
+            Bot::pause(1500).await;
+        }
+        let found = self.bot.party.as_ref().is_some_and(|p| p.config.auto);
+        if found {
+            if obs.booking.is_some() {
+                self.bot.act(Action::BookingDelete).await.ok();
+            }
+            if obs.party.is_some() {
+                self.bot.act(Action::PartyLeave).await.ok();
+            }
+        }
+    }
 }
 
 /// How far from its shop spot the bot still stands at the shop.
@@ -284,10 +396,12 @@ impl Agent {
             self.handle.events.send(Event::Asked).ok();
         }
         self.bot.decline_stale(&obs, self.run.goal.as_ref()).await;
-        if self
-            .bot
-            .party_reflexes(&obs, self.run.goal.as_ref())
-            .await?
+        // A bot on its way out neither recruits nor joins
+        if self.run.leaving.is_none()
+            && self
+                .bot
+                .party_reflexes(&obs, self.run.goal.as_ref())
+                .await?
         {
             return Ok(());
         }
@@ -363,9 +477,24 @@ impl Agent {
             {
                 // Decided before the goal failed
                 tracing::debug!(goal = %d.goal.label(), "a goal given up lately, not taken up again");
-            } else if self.run.goal.as_ref() != Some(&d.goal) {
+            } else if self.run.leave_to.is_none() && self.run.goal.as_ref() != Some(&d.goal) {
                 tracing::info!(goal = %d.goal.label(), reason = %d.reason, by_llm = d.by_llm, "new goal");
                 self.run.goal = Some(d.goal);
+                self.run.goal_since = Instant::now();
+                self.run.step_failures = 0;
+            }
+        }
+        // A bot whose session is over walks to a town to log off there, whatever the strategist says
+        if let Some(town) = &self.run.leave_to {
+            let goal = Goal::Explore { map: town.clone() };
+            let failed = self
+                .run
+                .failures
+                .iter()
+                .any(|(g, at)| *g == goal && at.elapsed() < FAILURE_MEMORY);
+            if !failed && self.run.goal.as_ref() != Some(&goal) {
+                tracing::info!(%town, "heading for a town to log off");
+                self.run.goal = Some(goal);
                 self.run.goal_since = Instant::now();
                 self.run.step_failures = 0;
             }
@@ -398,8 +527,10 @@ impl Agent {
             self.handle.events.send(event).ok();
             return Ok(());
         }
-        // In a party, following the leader replaces the hunt; errands still run as planned.
-        if let Some(outcome) = self.bot.party_step(&obs, self.run.goal.as_ref()).await? {
+        // In a party, following the leader replaces the hunt; errands still run as planned. A bot on its way out goes alone.
+        if self.run.leave_to.is_none()
+            && let Some(outcome) = self.bot.party_step(&obs, self.run.goal.as_ref()).await?
+        {
             self.run.last_outcome = match outcome {
                 Outcome::Failed(reason) => format!("with the party: {reason}"),
                 _ => "with the party".into(),

@@ -58,6 +58,7 @@ deployed copy of rust-ro. Check the working directory of the running `server.exe
 
 ```
 cargo run --release                                            # 50 bots from names.txt, decision model voice, llm-share 0.25
+                                                               # each logs off in a town after 30-60 min (--session), a resting one of 100 (--pool) takes its place
 cargo run --release -- --bots 10 --minutes 25 --log-dir logs  # one log per bot in logs/<name>.log
 cargo run -- --key-file ../rust-ro/config/bots_api_key.txt --name Goapy probe
 cargo run -- --name Goapy run --minutes 10                    # one bot; add --no-llm for the deterministic strategist

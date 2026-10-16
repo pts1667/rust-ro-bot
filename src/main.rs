@@ -14,7 +14,7 @@ mod social;
 mod strategist;
 mod voice;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -127,7 +127,8 @@ async fn main() -> Result<()> {
     }
 }
 
-/// The bots `run` plays: the one of `--name`, or the first `--bots` names of the `--names` file.
+/// The bots `run` plays: the one of `--name`, or the first names of the `--names` file, `--bots` of them and the
+/// resting ones of the pool (as many as the file has).
 fn bot_names(name: Option<&str>, args: &RunArgs) -> Result<Vec<String>> {
     if let Some(name) = name {
         return Ok(vec![name.to_owned()]);
@@ -148,7 +149,7 @@ fn bot_names(name: Option<&str>, args: &RunArgs) -> Result<Vec<String>> {
             args.bots
         );
     }
-    names.truncate(args.bots);
+    names.truncate(args.pool_size());
     Ok(names)
 }
 
@@ -167,12 +168,13 @@ fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Plays `names`, one bot after the other joining `--join-gap` seconds apart, until each has stopped. Ctrl-C stops
-/// them all after their current step.
+/// Plays `names` in `--bots` places, one bot after the other joining `--join-gap` seconds apart. With `--session`, a
+/// bot logs off after its session and the character of the pool resting longest takes its place, until `--minutes`
+/// are up. Ctrl-C stops them all after their current step.
 async fn run_bots(
     endpoints: &Endpoints,
     knowledge: Knowledge,
-    args: RunArgs,
+    mut args: RunArgs,
     names: Vec<String>,
 ) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -190,44 +192,75 @@ async fn run_bots(
     if let Some(dir) = &args.log_dir {
         tracing::info!(bots = names.len(), dir = %dir.display(), "each bot logs to <dir>/<name>.log");
     }
+    let places = args.bots.clamp(1, names.len());
+    let rotate = args.session.rotates() && names.len() > places;
+    if rotate {
+        tracing::info!(
+            characters = names.len(),
+            places,
+            minutes = format!("{}-{}", args.session.min, args.session.max),
+            "the characters take turns: each logs off after a session and one resting takes its place"
+        );
+        // `--minutes` ends the whole run, not each session
+        if let Some(minutes) = args.minutes.take() {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                if wait_unless(&stop, Duration::from_secs(minutes * 60)).await {
+                    tracing::info!("time is up: every bot logs off");
+                    stop.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+    } else if names.len() > 1 && args.session.rotates() {
+        tracing::info!(
+            bots = places,
+            "no character rests to take turns (raise --pool): the bots stay in the game"
+        );
+    }
+    let launcher = Launcher {
+        endpoints,
+        knowledge: &knowledge,
+        args: &args,
+        stop: &stop,
+        named,
+        rotate,
+    };
     let mut bots = tokio::task::JoinSet::new();
-    for (i, name) in names.iter().enumerate() {
+    for (i, name) in names[..places].iter().enumerate() {
         if i > 0 && !wait_unless(&stop, Duration::from_secs(args.join_gap)).await {
             break;
         }
-        let span = if named {
-            tracing::info_span!(logging::BOT_SPAN, name = name.as_str())
-        } else {
-            tracing::Span::none()
-        };
-        let (endpoints, knowledge, args, stop) = (
-            endpoints.clone(),
-            knowledge.for_bot(),
-            args.clone(),
-            stop.clone(),
-        );
-        let name = name.clone();
-        bots.spawn(async move {
-            let result = run(&endpoints, &name, knowledge, args, stop)
-                .instrument(span)
-                .await;
-            (name, result)
-        });
+        launcher.spawn(&mut bots, name.clone());
     }
+    // The characters out of the game, the one resting longest first
+    let mut resting: VecDeque<String> = names[places..].iter().cloned().collect();
     let (mut ended, mut failed) = (0, Vec::new());
     while let Some(joined) = bots.join_next().await {
         ended += 1;
-        match joined {
-            Ok((_, Ok(()))) => {}
+        let left = match joined {
+            Ok((name, Ok(()))) => Some(name),
             Ok((name, Err(error))) => {
                 tracing::warn!(bot = %name, error = format!("{error:#}"), "the bot stopped on an error");
                 failed.push(error);
+                None
             }
-            Err(error) => tracing::warn!(%error, "a bot's task ended badly"),
+            Err(error) => {
+                tracing::warn!(%error, "a bot's task ended badly");
+                None
+            }
+        };
+        if !rotate || stop.load(Ordering::SeqCst) {
+            continue;
+        }
+        // A bot that failed stays out: its name may be one the server refuses
+        resting.extend(left);
+        if let Some(next) = resting.pop_front() {
+            tracing::info!(bot = %next, "takes a free place in the game");
+            launcher.spawn(&mut bots, next);
         }
     }
     if names.len() > 1 {
-        tracing::info!(bots = ended, failed = failed.len(), "all bots stopped");
+        tracing::info!(sessions = ended, failed = failed.len(), "all bots stopped");
     }
     if ended == 1
         && let Some(error) = failed.pop()
@@ -238,6 +271,59 @@ async fn run_bots(
         bail!("every bot stopped on an error");
     }
     Ok(())
+}
+
+/// What starts a bot's session in `run_bots`.
+struct Launcher<'a> {
+    endpoints: &'a Endpoints,
+    knowledge: &'a Knowledge,
+    args: &'a RunArgs,
+    /// Set by Ctrl-C or the end of `--minutes`: every bot stops.
+    stop: &'a Arc<AtomicBool>,
+    /// Whether each log line names its bot.
+    named: bool,
+    /// Whether a bot logs off after a session of `--session` minutes.
+    rotate: bool,
+}
+
+impl Launcher<'_> {
+    fn spawn(&self, bots: &mut tokio::task::JoinSet<(String, Result<()>)>, name: String) {
+        let span = if self.named {
+            tracing::info_span!(logging::BOT_SPAN, name = name.as_str())
+        } else {
+            tracing::Span::none()
+        };
+        let mut stop = agent::Stop {
+            now: self.stop.clone(),
+            in_town: None,
+        };
+        if self.rotate {
+            // Set when the session is over: the bot logs off in the next town
+            let session = Arc::new(AtomicBool::new(false));
+            let (all, flag, length) =
+                (self.stop.clone(), session.clone(), self.args.session.pick());
+            span.in_scope(|| {
+                tracing::info!(minutes = length.as_secs() / 60, "joins for a session")
+            });
+            tokio::spawn(async move {
+                if wait_unless(&all, length).await {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            });
+            stop.in_town = Some(session);
+        }
+        let (endpoints, knowledge, args) = (
+            self.endpoints.clone(),
+            self.knowledge.for_bot(),
+            self.args.clone(),
+        );
+        bots.spawn(async move {
+            let result = run(&endpoints, &name, knowledge, args, stop)
+                .instrument(span)
+                .await;
+            (name, result)
+        });
+    }
 }
 
 /// Waits `time` unless `stop` is set first: whether it was not.
@@ -258,7 +344,7 @@ async fn run(
     name: &str,
     knowledge: Knowledge,
     args: RunArgs,
-    stop: Arc<AtomicBool>,
+    stop: agent::Stop,
 ) -> Result<()> {
     let api = BotApi::new(&endpoints.url, endpoints.load_key()?)?;
     ensure_connected(&api, name).await?;
