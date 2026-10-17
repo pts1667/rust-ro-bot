@@ -12,6 +12,9 @@ pub const DEFAULT_NAME: &str = "Rusty";
 
 /// The key file of a rust-ro checked out next to this repo, when neither `--key-file` nor `--key` gives one.
 pub const DEFAULT_KEY_FILE: &str = "../rust-ro/config/bots_api_key.txt";
+/// The Bot API and the reference without `--url`, `--db-url` or `--server-dir`: the server's defaults.
+const DEFAULT_URL: &str = "http://127.0.0.1:6902";
+const DEFAULT_DB_URL: &str = "http://127.0.0.1:6904";
 
 #[derive(Parser)]
 #[command(
@@ -48,23 +51,26 @@ impl Cli {
 
 #[derive(Args, Clone)]
 pub struct Endpoints {
-    /// Base URL of the bot API.
-    #[arg(
-        long,
-        env = "BOT_API_URL",
-        default_value = "http://127.0.0.1:6902",
-        global = true
-    )]
+    /// Base URL of the bot API [default: http://127.0.0.1:6902, or the one `--server-dir` sets up].
+    #[arg(long = "url", id = "url", env = "BOT_API_URL", global = true)]
+    url_arg: Option<String>,
+    /// The bot API, once `resolve` ran.
+    #[arg(skip)]
     pub url: String,
 
-    /// Base URL of the reference (`/db` and `/wiki`).
-    #[arg(
-        long,
-        env = "BOT_DB_URL",
-        default_value = "http://127.0.0.1:6904",
-        global = true
-    )]
+    /// Base URL of the reference (`/db` and `/wiki`) [default: http://127.0.0.1:6904, or the one `--server-dir` sets
+    /// up].
+    #[arg(long = "db-url", id = "db_url", env = "BOT_DB_URL", global = true)]
+    db_url_arg: Option<String>,
+    /// The reference, once `resolve` ran.
+    #[arg(skip)]
     pub db_url: String,
+
+    /// The folder of the rust-ro server: the bot API and the reference are where its `config.json` puts them (`bots`
+    /// and `reference`, a host of 0.0.0.0 meaning this machine), and the key is its `bots.api_key_path`. `--url`,
+    /// `--db-url`, `--key-file` and `--key` win over it.
+    #[arg(long, env = "BOT_SERVER_DIR", global = true)]
+    pub server_dir: Option<PathBuf>,
 
     /// Base URL of the llama.cpp server.
     #[arg(
@@ -189,6 +195,10 @@ pub struct RunArgs {
     /// Write each bot's log to `<dir>/<name>.log` instead of the terminal.
     #[arg(long)]
     pub log_dir: Option<PathBuf>,
+    /// Stop as on Ctrl-C when a line `stop` comes in on stdin or stdin closes: for a launcher that cannot send Ctrl-C.
+    /// The bots save their memory and log out; a launcher that dies closes the pipe and stops them too.
+    #[arg(long)]
+    pub stop_on_stdin: bool,
     /// Stop when the bot reaches this base level.
     #[arg(long)]
     pub until_level: Option<u32>,
@@ -297,6 +307,31 @@ impl RunArgs {
 }
 
 impl Endpoints {
+    /// Fills in the bot API, the reference and the key file from the options, `--server-dir` and the defaults.
+    pub fn resolve(&mut self) -> Result<()> {
+        let server = match &self.server_dir {
+            Some(dir) => Some(ServerSetup::read(dir)?),
+            None => None,
+        };
+        self.url = match (&self.url_arg, &server) {
+            (Some(url), _) => url.clone(),
+            (None, Some(server)) => server.url.clone(),
+            (None, None) => DEFAULT_URL.to_owned(),
+        };
+        self.db_url = match (&self.db_url_arg, &server) {
+            (Some(url), _) => url.clone(),
+            (None, Some(server)) => server.db_url.clone(),
+            (None, None) => DEFAULT_DB_URL.to_owned(),
+        };
+        if self.key_file.is_none()
+            && self.key.is_none()
+            && let Some(server) = server
+        {
+            self.key_file = Some(server.key_file);
+        }
+        Ok(())
+    }
+
     /// Reads the key from the file or the env var. The file may carry a UTF-8 BOM (PowerShell writes one),
     /// which the server would not strip, so it goes here.
     pub fn load_key(&self) -> Result<String> {
@@ -321,6 +356,55 @@ impl Endpoints {
 
     pub fn state_dir(&self) -> PathBuf {
         self.data_dir.join("state")
+    }
+}
+
+/// Where a rust-ro server in a folder serves the bot API and the reference, and where it keeps the key.
+struct ServerSetup {
+    url: String,
+    db_url: String,
+    key_file: PathBuf,
+}
+
+impl ServerSetup {
+    /// From `<dir>/config.json`. What it leaves out is the server's default, as the server reads it.
+    fn read(dir: &std::path::Path) -> Result<Self> {
+        let path = dir.join("config.json");
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading the server config {}", path.display()))?;
+        let config: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .with_context(|| format!("parsing the server config {}", path.display()))?;
+        Ok(Self::from_config(dir, &config))
+    }
+
+    fn from_config(dir: &std::path::Path, config: &serde_json::Value) -> Self {
+        let address = |section: &str, port: u16| {
+            let host = config[section]["host"].as_str().unwrap_or("127.0.0.1");
+            let port = config[section]["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(port);
+            format!("http://{}:{port}", reachable(host))
+        };
+        let key = config["bots"]["api_key_path"]
+            .as_str()
+            .unwrap_or("config/bots_api_key.txt");
+        Self {
+            url: address("bots", 6902),
+            db_url: address("reference", 6904),
+            // The server reads it from its working directory, its own folder
+            key_file: dir.join(key),
+        }
+    }
+}
+
+/// The host to reach a server bound to `host` at: the loopback for a bind to every address, brackets around IPv6.
+fn reachable(host: &str) -> String {
+    match host.trim_matches(|c| c == '[' || c == ']') {
+        "" | "0.0.0.0" => "127.0.0.1".to_owned(),
+        "::" => "[::1]".to_owned(),
+        v6 if v6.contains(':') => format!("[{v6}]"),
+        host => host.to_owned(),
     }
 }
 
@@ -395,5 +479,39 @@ mod tests {
         assert_eq!(args(&[]).pool_size(), 100);
         assert_eq!(args(&["--bots", "5", "--pool", "3"]).pool_size(), 5);
         assert_eq!(args(&["--bots", "5", "--session", "0"]).pool_size(), 5);
+    }
+
+    #[test]
+    fn server_dir_sets_the_addresses_and_the_key() {
+        let dir = std::path::Path::new("srv");
+        let config = serde_json::json!({
+            "bots": { "host": "0.0.0.0", "port": 7002, "api_key_path": "keys/bot.txt" },
+            "reference": { "host": "192.168.1.5" }
+        });
+        let server = ServerSetup::from_config(dir, &config);
+        assert_eq!(server.url, "http://127.0.0.1:7002");
+        assert_eq!(server.db_url, "http://192.168.1.5:6904");
+        assert_eq!(server.key_file, dir.join("keys/bot.txt"));
+        let server = ServerSetup::from_config(dir, &serde_json::json!({ "bots": { "host": "::" } }));
+        assert_eq!(server.url, "http://[::1]:6902");
+        assert_eq!(server.key_file, dir.join("config/bots_api_key.txt"));
+        assert_eq!(reachable("fe80::1"), "[fe80::1]");
+        assert_eq!(reachable("localhost"), "localhost");
+    }
+
+    #[test]
+    fn urls_given_win_over_the_server_dir() {
+        let endpoints = |line: &[&str]| {
+            let mut cli = Cli::try_parse_from([&["rust-ro-bot"], line].concat()).unwrap();
+            cli.endpoints.resolve().map(|()| cli.endpoints)
+        };
+        let plain = endpoints(&[]).unwrap();
+        assert_eq!(plain.url, DEFAULT_URL);
+        assert_eq!(plain.db_url, DEFAULT_DB_URL);
+        assert!(plain.key_file.is_none());
+        let given = endpoints(&["--url", "http://h:1", "--db-url", "http://h:2"]).unwrap();
+        assert_eq!((given.url.as_str(), given.db_url.as_str()), ("http://h:1", "http://h:2"));
+        // A server folder without a config is an error, not the defaults
+        assert!(endpoints(&["--server-dir", "no/such/dir", "--url", "http://h:1"]).is_err());
     }
 }

@@ -10,7 +10,8 @@ running. **The model is optional:** without one, bots play with the rules alone.
 ## What you need
 
 - A running rust-ro server. Its Bot API (port 6902) and reference (port 6904) are on by default.
-- Rust 1.88 or newer, and git: `cargo` fetches one dependency from GitHub.
+- Rust through [rustup](https://rustup.rs), and git: `cargo` fetches one dependency from GitHub. `rust-toolchain.toml`
+  pins Rust 1.97.1, which rustup installs on the first build.
 - Optional: a [llama.cpp](https://github.com/ggml-org/llama.cpp) server for the goals and the chat (see [Language models](#language-models)).
 
 ## Quick start
@@ -46,7 +47,8 @@ A new character starts as a level 1 Novice in the training grounds, exactly like
 
 Change `../rust-ro/config/bots_api_key.txt` to wherever your server keeps its key. Instead of `--key-file`, you can set
 `BOT_API_KEY_FILE`. Without either, the bot reads `../rust-ro/config/bots_api_key.txt`, the key of a rust-ro checked out
-next to this repo.
+next to this repo. `--server-dir <rust-ro folder>` takes the key, and the Bot API and reference addresses, from that
+server's `config.json` (a host of `0.0.0.0` there means this machine); `--url`, `--db-url` and `--key-file` still win.
 
 ## Running many bots
 
@@ -67,7 +69,12 @@ cargo run --release -- --bots 10 --minutes 30 --log-dir logs
   names of `names.txt` (default twice `--bots`, so 100). `--session 0` keeps every bot in the game. With turns,
   `--minutes` ends the whole run instead of each session.
 - `--log-dir <dir>` writes each bot's log to `<dir>/<name>.log`. Without it, every line in the terminal names its bot.
-- Ctrl+C stops them all after their current step, each with its report.
+- Ctrl+C stops them all after their current step, each with its report. So do SIGTERM, and on Windows Ctrl+Break or
+  the console closing. A program that starts the bots and cannot send those passes `--stop-on-stdin` and writes a line
+  `stop` to the bots' stdin, or closes it: the bots stop the same way, and stop as well when that program dies.
+- A run killed outright leaves its characters in the game until the server's idle timeout (`bots.idle_logout_secs`, 20
+  minutes). The next run logs out the resting characters of its pool that are still there, so they take no places,
+  and the ones it plays log in again in theirs.
 - `names.txt` holds 640 names. `python tools/names.py 1000` adds made-up names up to 1000, after the ones already
   there. `--names <file>` reads another list.
 - The server lets 20 bots in at once by default. For more, raise `bots.max_bots` in the server's `config.json` and
@@ -113,6 +120,7 @@ Options of `run`:
 | `--session MIN-MAX` | Minutes a bot plays before another character of the pool takes its place (default `30-60`, `0` for never). |
 | `--pool N` | Characters taking turns in the `--bots` places (default twice `--bots`). |
 | `--minutes N` | Stop after N minutes. |
+| `--stop-on-stdin` | Stop as on Ctrl+C when a line `stop` comes on stdin or stdin closes. |
 | `--until-level N` | Stop at base level N. |
 | `--no-llm` | No language model: the rules pick every goal, and the bot doesn't chat or visit the forum. |
 | `--llm-share F` | Share of goal choices given to the model, from 0 to 1 (default 0.25 with `system-one`, 1 with `llm`). |
@@ -128,6 +136,7 @@ Global options work with every command:
 | `--name` | none for `run` (it plays `--bots` bots), `Rusty` for the other commands |
 | `--url`, or `BOT_API_URL` | `http://127.0.0.1:6902` |
 | `--db-url`, or `BOT_DB_URL` | `http://127.0.0.1:6904` |
+| `--server-dir`, or `BOT_SERVER_DIR` | none: the addresses and key file of the rust-ro server in that folder |
 | `--llm-url`, or `BOT_LLM_URL` | `http://127.0.0.1:8080` |
 | `--s1-url`, or `BOT_S1_URL` | `http://127.0.0.1:9931` |
 | `--data-dir` | `.` |

@@ -34,7 +34,8 @@ use strategist::llm::Llm;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.endpoints.resolve()?;
     // `run` is the command when none is given
     let run_args = match &cli.command {
         None => Some(cli.run.clone()),
@@ -181,10 +182,31 @@ async fn run_bots(
     {
         let stop = stop.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                tracing::info!("Ctrl-C: stopping after the current step");
-                stop.store(true, Ordering::SeqCst);
+            let why = stop_signal().await;
+            tracing::info!("{why}: stopping after the current step");
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+    if args.stop_on_stdin {
+        let stop = stop.clone();
+        // On a thread of its own: the read blocks
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) | Err(_) => {
+                        tracing::info!("stdin closed: stopping after the current step");
+                        break;
+                    }
+                    Ok(_) if line.trim().eq_ignore_ascii_case("stop") => {
+                        tracing::info!("stop on stdin: stopping after the current step");
+                        break;
+                    }
+                    Ok(_) => {}
+                }
             }
+            stop.store(true, Ordering::SeqCst);
         });
     }
     // One bot logs to the terminal as before; with several, each line says whose it is
@@ -217,6 +239,7 @@ async fn run_bots(
             "no character rests to take turns (raise --pool): the bots stay in the game"
         );
     }
+    release_resting(endpoints, &names[..places], &names[places..]).await;
     let launcher = Launcher {
         endpoints,
         knowledge: &knowledge,
@@ -273,6 +296,50 @@ async fn run_bots(
     Ok(())
 }
 
+/// Logs out the characters of `resting` still in the game, left there by an earlier run that was killed rather than
+/// stopped: until the server's idle timeout they would take places the bots of `playing` need. The characters of
+/// `playing` play on in theirs.
+async fn release_resting(endpoints: &Endpoints, playing: &[String], resting: &[String]) {
+    if resting.is_empty() {
+        return;
+    }
+    let listed = match endpoints.load_key().and_then(|key| BotApi::new(&endpoints.url, key)) {
+        Ok(api) => api.list().await.map(|bots| (api, bots)),
+        Err(error) => Err(error),
+    };
+    let (api, bots) = match listed {
+        Ok(listed) => listed,
+        Err(error) => {
+            // Each bot reports what is wrong with the server when it joins
+            tracing::debug!(error = format!("{error:#}"), "could not list the bots in the game");
+            return;
+        }
+    };
+    let left: Vec<String> = bots
+        .into_iter()
+        .filter(|b| b.connected)
+        .map(|b| b.name)
+        .filter(|name| {
+            resting.iter().any(|r| r.eq_ignore_ascii_case(name))
+                && !playing.iter().any(|p| p.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if left.is_empty() {
+        return;
+    }
+    tracing::info!(count = left.len(), "logging out the resting characters an earlier run left in the game");
+    let mut out = tokio::task::JoinSet::new();
+    for name in left {
+        let api = api.clone();
+        out.spawn(async move {
+            if let Err(error) = api.disconnect(&name).await {
+                tracing::warn!(bot = %name, error = format!("{error:#}"), "could not log out a resting character");
+            }
+        });
+    }
+    out.join_all().await;
+}
+
 /// What starts a bot's session in `run_bots`.
 struct Launcher<'a> {
     endpoints: &'a Endpoints,
@@ -323,6 +390,44 @@ impl Launcher<'_> {
                 .await;
             (name, result)
         });
+    }
+}
+
+/// Waits for Ctrl-C or the system asking the process to end: SIGTERM, or on Windows the console closing, Ctrl-Break,
+/// a log-off or a shutdown. What came, for the log.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return "Ctrl-C",
+                _ = term.recv() => return "SIGTERM",
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        if let (Ok(mut close), Ok(mut brk), Ok(mut shutdown), Ok(mut logoff)) = (
+            windows::ctrl_close(),
+            windows::ctrl_break(),
+            windows::ctrl_shutdown(),
+            windows::ctrl_logoff(),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return "Ctrl-C",
+                _ = close.recv() => return "console closed",
+                _ = brk.recv() => return "Ctrl-Break",
+                _ = shutdown.recv() => return "shutdown",
+                _ = logoff.recv() => return "log-off",
+            }
+        }
+    }
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => "Ctrl-C",
+        // No signal can come: wait for the other ways to stop
+        Err(_) => std::future::pending().await,
     }
 }
 
