@@ -32,6 +32,10 @@ pub enum Said {
     Away(String),
     /// The speaker is back from an errand: "back".
     Back,
+    /// The leader calls a break in a town, for some minutes: "break in prontera for 8 min".
+    Break { town: String, minutes: u32 },
+    /// The leader ends the break: "break's over, let's go".
+    BreakOver,
     /// Whispered to a party's leader, about its booking ad: "party? level 12/9 Swordman".
     WantParty {
         base: u32,
@@ -61,6 +65,8 @@ impl Said {
             Said::SendingPotions(to) => format!("sending potions to {to}"),
             Said::Away(reason) => format!("brb, {reason}"),
             Said::Back => "back".into(),
+            Said::Break { town, minutes } => format!("break in {town} for {minutes} min"),
+            Said::BreakOver => "break's over, let's go".into(),
             Said::WantParty {
                 base,
                 job,
@@ -83,6 +89,27 @@ fn level_words(text: &str) -> Option<(u32, u32, String)> {
         job.parse().ok()?,
         words.get(at + 2).copied().unwrap_or_default().to_owned(),
     ))
+}
+
+/// Minutes of a break called without saying how long.
+const BREAK_MINUTES: u32 = 8;
+
+/// The town and minutes of `prontera for 8 min`.
+fn break_words(rest: &str) -> (String, u32) {
+    let mut words = rest.split_whitespace();
+    let town = words
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(['.', '!', ','])
+        .to_owned();
+    let minutes = words
+        .find_map(|w| {
+            w.trim_end_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .ok()
+        })
+        .unwrap_or(BREAK_MINUTES);
+    (town, minutes)
 }
 
 /// Reads a party message or a whisper (`Name : text`).
@@ -135,6 +162,14 @@ pub fn parse(message: &str) -> Option<Line> {
         || lower.contains("no potions")
     {
         Said::NeedPotions
+    } else if let Some(rest) = lower.strip_prefix("break in ") {
+        let (town, minutes) = break_words(rest);
+        Said::Break { town, minutes }
+    } else if lower.starts_with("break's over")
+        || lower.starts_with("break is over")
+        || lower.starts_with("break over")
+    {
+        Said::BreakOver
     } else if let Some(reason) = lower.strip_prefix("brb") {
         Said::Away(reason.trim_start_matches([',', ' ', ':']).trim().to_owned())
     } else if lower == "back" || lower == "i'm back" || lower == "im back" {
@@ -169,6 +204,11 @@ mod tests {
             Said::SendingPotions("bravo".into()),
             Said::Away("selling loot".into()),
             Said::Back,
+            Said::Break {
+                town: "prontera".into(),
+                minutes: 8,
+            },
+            Said::BreakOver,
             Said::WantParty {
                 base: 12,
                 job: 9,
@@ -208,6 +248,21 @@ mod tests {
                 job_name: String::new()
             }
         );
+        assert_eq!(
+            said("Tom : break in Payon for 10min"),
+            Said::Break {
+                town: "payon".into(),
+                minutes: 10
+            }
+        );
+        assert_eq!(
+            said("Tom : break in geffen!"),
+            Said::Break {
+                town: "geffen".into(),
+                minutes: BREAK_MINUTES
+            }
+        );
+        assert_eq!(said("Tom : break over"), Said::BreakOver);
         assert!(parse("no speaker here").is_none());
     }
 }

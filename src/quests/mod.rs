@@ -1,11 +1,13 @@
 //! Quests the bot can follow, written down the way a player follows a guide: where to go, whom to talk to, what
-//! to answer and what to bring. The second-job quests of the guilds and the skill quests are here.
+//! to answer and what to bring. The first- and second-job quests of the guilds and the skill quests are here.
 //!
 //! A quest is a list of stages. The bot remembers the stage it is at (`QuestProgress` in its memory), since the
 //! server keeps its own progress in script variables nobody sees. Stages whose result shows in the observation (a
 //! skill learned, an item held, a job) are skipped when already done.
 
+pub mod first_jobs;
 pub mod jobs;
+pub mod rebirth;
 pub mod skills;
 pub mod skills2;
 
@@ -21,6 +23,8 @@ use crate::party::same_job;
 pub enum Reward {
     Job(&'static str),
     Skill(&'static str),
+    /// A new life as a High Novice.
+    Rebirth,
 }
 
 /// Items and amounts.
@@ -38,6 +42,14 @@ pub struct Quest {
     pub base_level: u32,
     /// `male` or `female` when only one may take it.
     pub sex: Option<&'static str>,
+    /// Only for a reborn character (`Some(true)`) or one that is not (`Some(false)`): a High Novice is no Novice to
+    /// the guilds, it changes job at its own NPCs.
+    pub reborn: Option<bool>,
+    /// The second jobs whose reborn line the quest belongs to (a High Swordman for a reborn Knight or Crusader);
+    /// empty for any.
+    pub past: &'static [&'static str],
+    /// Only without a cart, which nothing the bot can do takes off.
+    pub no_cart: bool,
     /// Skills (name, level) the quest asks for before it starts.
     pub skills: &'static [(&'static str, u32)],
     pub stages: Vec<Stage>,
@@ -95,7 +107,13 @@ pub enum Act {
         y: u16,
         menu: &'static [&'static str],
         answers: &'static [(&'static str, &'static str)],
+        /// Cells never to step on (pitfalls), as the script places them: `(x, y, x_span, y_span)`, the area being the
+        /// cells within the spans of `x`, `y`.
+        avoid: &'static [Trap],
     },
+    /// Leave everything behind: spend the zeny down to the storage fee at a shop, then put every item, worn ones
+    /// too, into the Kafra storage.
+    Unburden(Unburden),
     /// Join the waiting room of an NPC and wait to be sent to the test.
     Room {
         map: &'static str,
@@ -104,6 +122,26 @@ pub enum Act {
     /// Dance to the calls of the map's announcements: on each, step onto the cell of the move it names last (`cells`),
     /// from the call holding `start` on. After the call holding `finish`, step onto `end` until sent off the floor.
     Dance(Dance),
+}
+
+/// Where a character leaves its zeny and its items: the shops to spend on (the last one buys what the storage
+/// refuses), and a Kafra with its storage fee.
+#[derive(Debug, Clone)]
+pub struct Unburden {
+    pub map: &'static str,
+    pub shops: &'static [(&'static str, u16, u16)],
+    pub kafra: (&'static str, u16, u16),
+    pub fee: u64,
+}
+
+/// A touch area of a script, `(x, y, x_span, y_span)`.
+pub type Trap = (u16, u16, u16, u16);
+
+/// Whether a cell is in one of the areas.
+pub fn trapped(avoid: &[Trap], (x, y): (u16, u16)) -> bool {
+    avoid
+        .iter()
+        .any(|&(tx, ty, xs, ys)| x.abs_diff(tx) <= xs && y.abs_diff(ty) <= ys)
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +171,14 @@ pub struct Talk {
     pub assigns: &'static [Items],
     /// Times to talk in a row (some NPCs only answer after several clicks).
     pub times: u8,
+    /// What to answer, in this order, to the menus and prompts of the talk (a machine to work), before the other
+    /// answers: a menu entry containing the step, or the step typed in. `{remembered}` is what the quest remembered.
+    pub steps: &'static [&'static str],
+    /// The NPC says one of these (a serial number to give elsewhere): the one it said is remembered.
+    pub remembers: &'static [&'static str],
+    /// The part (region) of the map the NPC is talked to from, when the reference places it in none: the Heart of
+    /// Ymir stands on a wall of its room.
+    pub room: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +223,10 @@ pub enum Check {
     At(&'static str, (u16, u16, u16, u16)),
     /// At least this many of the item.
     Count(u32, u32),
+    /// The items held are worth at least this many points, each item its points (the grades of a guild test).
+    Points(Items, u32),
+    /// No item carried or worn, and no zeny.
+    Bare,
 }
 
 impl Check {
@@ -196,6 +246,8 @@ impl Check {
             Check::OnMap(map) => obs.map.name == *map,
             Check::OffMap(map) => obs.map.name != *map,
             Check::Count(id, n) => obs.item_count(*id) >= *n,
+            Check::Points(items, n) => points(items, obs) >= *n,
+            Check::Bare => obs.inventory.is_empty() && obs.me.zeny == 0,
             Check::At(map, (x0, y0, x1, y1)) => {
                 obs.map.name == *map
                     && (*x0..=*x1).contains(&obs.me.x)
@@ -208,6 +260,14 @@ impl Check {
     fn by_state(&self) -> bool {
         !matches!(self, Check::Said(_) | Check::OnMap(_) | Check::OffMap(_))
     }
+}
+
+/// What the items held are worth, each item its points.
+pub fn points(items: Items, obs: &Observation) -> u32 {
+    items
+        .iter()
+        .map(|(id, worth)| obs.item_count(*id) * worth)
+        .sum()
 }
 
 /// Lower case, colour codes (`^0000FF`) and extra spaces gone.
@@ -248,12 +308,16 @@ pub struct QuestProgress {
     pub done: bool,
     /// The way of the quest the bot was sent, once the quest window showed it.
     pub branch: Option<String>,
+    /// What an NPC said to remember (`Talk::remembers`).
+    pub remembered: Option<String>,
 }
 
 pub type QuestBook = BTreeMap<String, QuestProgress>;
 
 static ALL: std::sync::LazyLock<Vec<Quest>> = std::sync::LazyLock::new(|| {
-    let mut v = jobs::quests();
+    let mut v = first_jobs::quests();
+    v.extend(jobs::quests());
+    v.extend(rebirth::quests());
     v.extend(skills::quests());
     v
 });
@@ -269,8 +333,12 @@ pub fn find(id: &str) -> Option<&'static Quest> {
 impl Quest {
     pub fn finished(&self, obs: &Observation) -> bool {
         match self.reward {
-            Reward::Job(job) => same_job(&obs.me.job, job),
+            // The job of a reborn line is only reached reborn: a Knight is no Lord Knight
+            Reward::Job(job) => {
+                same_job(&obs.me.job, job) && (self.reborn != Some(true) || obs.me.reborn)
+            }
             Reward::Skill(skill) => obs.skill_level(skill) > 0,
+            Reward::Rebirth => obs.me.reborn,
         }
     }
 
@@ -282,6 +350,13 @@ impl Quest {
             && me.base_level >= self.base_level
             && self.sex.is_none_or(|s| me.sex.eq_ignore_ascii_case(s))
             && self.skills.iter().all(|(s, l)| obs.skill_level(s) >= *l)
+            && self.reborn.is_none_or(|r| r == me.reborn)
+            && (self.past.is_empty()
+                || me
+                    .past_job
+                    .as_deref()
+                    .is_some_and(|p| self.past.iter().any(|j| same_job(p, j))))
+            && !(self.no_cart && obs.cart.is_some())
             && !self.finished(obs)
     }
 
@@ -365,23 +440,39 @@ impl Quest {
         })
     }
 
-    /// The stage to act on: the current one, or the one leading into its test room when the bot is not in it.
+    /// The stage to act on: the current one, or the one leading into its test room when the bot is not in it. A
+    /// talk in a room of a map the bot is on (a waiting room) is away too when the bot stands outside the room.
     pub fn actionable_stage(&self, progress: &QuestProgress, obs: &Observation) -> usize {
         let mut i = self.current_stage(progress, obs);
-        while i > 0
-            && i < self.stages.len()
-            && self.stages[i].inside
-            && stage_map(&self.stages[i]) != Some(obs.map.name.as_str())
-        {
+        while i > 0 && i < self.stages.len() && self.stages[i].inside {
+            let stage = &self.stages[i];
+            let away = stage_map(stage) != Some(obs.map.name.as_str())
+                || matches!(stage.act, Act::Talk(_))
+                    && stage.area.is_some()
+                    && !stage.holds_bot(obs);
+            if !away {
+                break;
+            }
             i -= 1;
         }
         i
     }
 
-    /// Every item the quest may ask for, not to be sold.
+    /// Every item the quest may ask for or hand out along the way (a package, a voucher), not to be sold.
     pub fn items(&self) -> Vec<u32> {
         let mut v = Vec::new();
         for stage in &self.stages {
+            let until = match &stage.act {
+                Act::Fight(f) => f.until.as_slice(),
+                _ => &[],
+            };
+            for check in stage.done.iter().chain(until) {
+                match check {
+                    Check::Item(id) | Check::Count(id, _) => v.push(*id),
+                    Check::Points(items, _) => v.extend(items.iter().map(|(id, _)| *id)),
+                    _ => {}
+                }
+            }
             match &stage.act {
                 Act::Gather(Need::Items(items) | Need::ItemsAndZeny(items, _)) => {
                     v.extend(items.iter().map(|(i, _)| *i))
@@ -475,6 +566,7 @@ pub fn stage_map(stage: &Stage) -> Option<&'static str> {
         Act::Fight(f) => Some(f.map),
         Act::Endure { map } | Act::Walk { map, .. } | Act::Room { map, .. } => Some(map),
         Act::Dance(d) => Some(d.map),
+        Act::Unburden(u) => Some(u.map),
         Act::Gather(_) => None,
     }
 }
@@ -510,6 +602,9 @@ pub mod build {
                 assigns: &[],
                 times: 1,
                 recite: false,
+                steps: &[],
+                remembers: &[],
+                room: None,
             }),
             Vec::new(),
             false,
@@ -565,10 +660,15 @@ pub mod build {
                 y,
                 menu: &[],
                 answers: &[],
+                avoid: &[],
             },
             Vec::new(),
             false,
         )
+    }
+
+    pub fn unburden(what: &'static str, at: Unburden) -> Stage {
+        stage(what, Act::Unburden(at), vec![Check::Bare], false)
     }
 
     pub fn room(what: &'static str, map: &'static str, npc: &'static str) -> Stage {
@@ -618,6 +718,32 @@ pub mod build {
             if let Act::Fight(f) = &mut self.act {
                 f.until.push(check);
             }
+            self
+        }
+
+        /// The answers, in order, to the menus and prompts of a talk.
+        pub fn steps(mut self, steps: &'static [&'static str]) -> Self {
+            self.talk_mut().steps = steps;
+            self
+        }
+
+        /// The NPC says one of these to remember for later (`{remembered}` in the steps).
+        pub fn remembers(mut self, values: &'static [&'static str]) -> Self {
+            self.talk_mut().remembers = values;
+            self
+        }
+
+        /// Cells a walk never steps on.
+        pub fn avoid(mut self, traps: &'static [Trap]) -> Self {
+            if let Act::Walk { avoid, .. } = &mut self.act {
+                *avoid = traps;
+            }
+            self
+        }
+
+        /// The room the NPC is talked to from (`Talk::room`).
+        pub fn room(mut self, region: u32) -> Self {
+            self.talk_mut().room = Some(region);
             self
         }
 
@@ -780,6 +906,9 @@ mod tests {
             job_level: 1,
             base_level: 1,
             sex: None,
+            reborn: None,
+            past: &[],
+            no_cart: false,
             skills: &[],
             stages: vec![
                 talk("a", "prt_in", "Nami", 1, 1).said("awaiting your return"),
@@ -876,5 +1005,138 @@ mod tests {
             ),
             at("become a Crusader")
         );
+    }
+
+    fn novice_with(quest: u32, map: &str, (x, y): (u16, u16)) -> Observation {
+        use crate::api::observation::QuestEntry;
+        let mut obs = Observation::default();
+        obs.me.job = "Novice".into();
+        obs.map.name = map.into();
+        (obs.me.x, obs.me.y) = (x, y);
+        obs.quests.push(QuestEntry {
+            id: quest,
+            ..Default::default()
+        });
+        obs
+    }
+
+    #[test]
+    fn the_swordman_course_follows_the_bot_through_its_halls() {
+        let q = find("job:Swordman").unwrap();
+        let at = |what: &str| {
+            q.stages
+                .iter()
+                .position(|s| s.what.starts_with(what))
+                .unwrap()
+        };
+        let fresh = QuestProgress::default();
+        let stage = |map: &str, cell| q.actionable_stage(&fresh, &novice_with(1014, map, cell));
+        assert_eq!(stage("job_sword1", (10, 245)), at("cross the first hall"));
+        assert_eq!(
+            stage("job_sword1", (215, 244)),
+            at("step onto the way to the second")
+        );
+        assert_eq!(stage("job_sword1", (11, 207)), at("cross the second hall"));
+        assert_eq!(stage("job_sword1", (11, 169)), at("cross the third hall"));
+        assert_eq!(stage("job_sword1", (215, 167)), at("tell Mae"));
+        assert_eq!(stage("job_sword1", (65, 56)), at("climb out of the pit"));
+        assert_eq!(stage("izlude_in", (39, 170)), at("ask the Test Hall Staff"));
+        // Sent back to the hall in the middle of the course: through the door again.
+        let midway = QuestProgress {
+            stage: at("cross the second hall"),
+            ..Default::default()
+        };
+        assert_eq!(
+            q.actionable_stage(&midway, &novice_with(1014, "izlude_in", (65, 165))),
+            at("go into the test hall")
+        );
+        // Sent out by Mae once the course is done: to the Swordman of the guild, whom the door also sends to.
+        let passed = QuestProgress {
+            stage: at("tell Mae") + 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            q.actionable_stage(&passed, &novice_with(1014, "izlude_in", (65, 165))),
+            at("become a Swordman")
+        );
+        assert_eq!(
+            q.stages[at("go into the test hall")]
+                .back
+                .first()
+                .map(|b| b.1),
+            Some(at("become a Swordman"))
+        );
+    }
+
+    #[test]
+    fn the_course_keeps_off_every_pit() {
+        let q = find("job:Swordman").unwrap();
+        for s in &q.stages {
+            if let Act::Walk { x, y, avoid, .. } = &s.act {
+                assert!(!trapped(avoid, (*x, *y)), "'{}' ends on a pit", s.what);
+            }
+        }
+        assert!(trapped(
+            q.stages
+                .iter()
+                .find_map(|s| match &s.act {
+                    Act::Walk { avoid, .. } => Some(*avoid),
+                    _ => None,
+                })
+                .unwrap(),
+            (62, 250)
+        ));
+    }
+
+    #[test]
+    fn the_mage_quest_goes_the_way_of_its_solution() {
+        let q = find("job:Mage").unwrap();
+        let at = |what: &str| {
+            q.stages
+                .iter()
+                .position(|s| s.what.starts_with(what))
+                .unwrap()
+        };
+        let fresh = QuestProgress::default();
+        let mut obs = novice_with(1007, "geffen_in", (164, 120));
+        assert_eq!(q.actionable_stage(&fresh, &obs), at("gather 6 Jellopy"));
+        for (item_id, amount) in [(909, 6), (914, 1)] {
+            obs.inventory.push(InventoryItem {
+                item_id,
+                amount,
+                ..Default::default()
+            });
+        }
+        let stage = q.actionable_stage(&fresh, &obs);
+        assert_eq!(q.stages[stage].branch, Some("3"));
+        assert!(q.stages[stage].what.starts_with("buy Payon Solution"));
+        obs.inventory.push(InventoryItem {
+            item_id: 1089,
+            amount: 1,
+            ..Default::default()
+        });
+        let stage = q.actionable_stage(&fresh, &obs);
+        assert!(q.stages[stage].what.starts_with("mix the solution"));
+        assert_eq!(q.stages[stage].branch, Some("3"));
+        // The test tube and the solvent are not for sale.
+        assert!(q.items().contains(&1092) && q.items().contains(&1089));
+    }
+
+    #[test]
+    fn mushrooms_count_by_their_grade() {
+        let mut obs = Observation::default();
+        let check = Check::Points(&[(1069, 3), (1070, 1)], 25);
+        obs.inventory.push(InventoryItem {
+            item_id: 1069,
+            amount: 8,
+            ..Default::default()
+        });
+        assert!(!check.holds(&obs, &[]));
+        obs.inventory.push(InventoryItem {
+            item_id: 1070,
+            amount: 1,
+            ..Default::default()
+        });
+        assert!(check.holds(&obs, &[]));
     }
 }

@@ -71,8 +71,9 @@ voice/                    --voice llm (free text, the LLM strategist) or system-
 
 ### Option menu (strategist/options.rs)
 
-`leave_training` (the only option while on `new_*`), `job_change:<job>` (job level 10 for a first job, 40 for a second;
-only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warps, from `knowledge::grounds`, with the
+`leave_training` (the only option while on `new_*`), `job_change:<job>` (the Job Master of Prontera, a test NPC only
+there with the server's `scripting.test_npcs`; otherwise first jobs are `quest:job:<job>` of `quests/first_jobs.rs`, job
+level 10 and Basic Skill 9; only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warps, from `knowledge::grounds`, with the
 exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multiple of max HP), `rest`, and
 `explore:<map>` (up to 2 unvisited maps within 2 warps, the insides of towns included).
 
@@ -99,6 +100,19 @@ exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multip
   suit (any while they are as created; else those of its build, e.g. Swordman, Merchant or Thief for melee), and the
   build follows a job taken while the stats are fresh. Before, every bot kept the default melee build and became a
   Swordman; asked, the decision model picked Swordman 7 times in 10.
+- Rebirth and the transcendent jobs (`quests/rebirth.rs`, `knowledge/classes.rs`): a second job at base level 99 and
+  job level 50 saves 1,285,040 zeny (the gear budget holds it back, `zeny_saved`), donates to Metheus Sylphe in
+  `yuno_in02`, reads the Book of Ymir (quest 1000), leaves everything behind (`Act::Unburden`: the zeny spent down to
+  the 40 z storage fee at Mr. King's Shop and the Tool Dealer of `yuno`, dearest for its weight first and 1 z Arrows
+  for the change, then every item, worn ones too, put into the Kafra storage, in rounds as the weight limit asks),
+  touches the Heart of Ymir and asks the Valkyrie (back to leaving things behind when she says something is still
+  carried). The High Novice is sent to its guild's town; the guild master makes it the high first job of its old
+  line (`job:<first> High`), and at job level 40 the Book of Ymir leads it back to Valhalla, where the master of its
+  old second job makes it the transcendent one (`job:Lord Knight`...). The Teleporter of Valhalla is a way out to
+  Juno in the route graph (`talks::TELEPORTERS`). The server names reborn classes `NoviceHigh`, `LordKnight`...;
+  the observation reads each as the job it continues with `reborn` set (`Me::class` keeps the server's name), and the
+  bot remembers its second job (`Memory::past_job`) since the server's `advjob` is not shown. Reborn, the job target
+  is the old second job (`head_for_reborn`), and quests take `reborn`, `past` and `no_cart` conditions.
 
 ### Parties (party/)
 
@@ -122,13 +136,16 @@ them another way.
   than 15 apart). The others accept invitations from friends only.
 - Party chat (`party/chat.rs`), plain words a person can type too: `hunting at <map>` (the leader, when its hunt
   goal changes), `level <base>/<job> <Job>` (on joining and every level), `follow me`, `stay here`, `heal please`
-  (below 40% HP with a healer in sight), `out of potions`, `sending potions to <name>`, `brb, <errand>` and `back`;
-  whispered: `party? level <base>/<job> <Job>` and `sorry, <reason>`.
+  (below 40% HP with a healer in sight), `out of potions`, `sending potions to <name>`, `brb, <errand>` and `back`,
+  `break in <town> for <n> min` and `break's over, let's go` (the leader, for the party's town break); whispered:
+  `party? level <base>/<job> <Job>` and `sorry, <reason>`.
 - A member follows the leader (or whoever said `follow me`): to its map with the travel behaviour, then within 7 cells.
   It fights, in order: a monster attacking a member, what the leader hits (its sprite shows it), the best target within
-  10 cells of the leader. Errands (sell, buy potions, job change, leaving the training grounds) still run as planned,
-  announced with `brb`. A leader away on an errand is not followed. Nor is one more than 6 warps away, or only
-  reachable through a deadly map, or on a deadly map: the member plays by itself meanwhile (checked every 2 minutes).
+  10 cells of the leader. Errands (sell, buy potions, job change, a job quest, leaving the training grounds) still run
+  as planned, announced with `brb` (a long one again every 5 minutes, before the others take it for over). Booking-board
+  followers never finished their job quests: every hunt for a quest item gave way to following. A leader away on an
+  errand is not followed. Nor is one more than 6 warps away, or only reachable through a deadly map, or on a deadly
+  map: the member plays by itself meanwhile (checked every 2 minutes).
   Members used to go 30 warps after a leader in Rachel, and 15 died on the way in one run.
 - Every bot, solo or not, leaves monsters to other players: one that attacks an outsider or that an outsider hits is
   not a target. A monster that attacks a member is worth 4x as a target. The leader does not pull more while a member
@@ -153,14 +170,22 @@ them another way.
 - NPC names in the observation drop the `#suffix` that `/db` keeps (`Tool Dealer` vs `Tool Dealer#prt`). Match shops
   by position. Some shops stand behind a counter (Tool Dealer on `alberta_in`) and every `use` is refused: they go to
   `bad_shops`.
-- `/db/items/501.sold_by` lists the potion shops with map, x, y and price. Maps have a `town` flag. Prontera has a
-  `Job Master`. Item heal amounts are in the item `script` (`itemheal rand(45,65),0;`).
+- `/db/items/501.sold_by` lists the potion shops with map, x, y and price. Maps have a `town` flag. The Job Master of Prontera,
+  the warpers and the Prontera item mall are test NPCs (`"test": true` in `npcs.json`), placed only with
+  `scripting.test_npcs` (off by default since 2026-10-17). Item heal amounts are in the item `script` (`itemheal rand(45,65),0;`).
 - Some maps list no warps of their own (`moc_fild20`); the warps that land on them are in `arrivals`, and the graph
   adds the way back from those as guessed edges. Guesses can be wrong: `moc_fild20` is a guarded zone whose exits are
   Continental Guard NPCs that refuse to let anyone out (one offers a warp to Morocc), and the sewer exit landing on
   `prt_fild05` (274,208) has no warp back (the entrance is the Culvert Guardian quest). A warp that 5 unhindered walks
   could not take goes to `bad_warps` (`from:x,y>to`); a failed guess rules out every guess of that map (`from:*`).
   Routes, hunt and explore options leave them out.
+- Morocc is walled in by `moc_fild20`: without the warpers, every way into the town is a warp onto it and the guard at
+  the landing ("Ask What Happened", "Ask About Guard's Location", "Please do."). Routes take that way (`through` in
+  `knowledge/talks.rs`), asking the guard nearest the landing, so they never cross the field; the guards' way back
+  out to `moc_fild01` is only for a bot already there.
+- NPCs with the invisible sprite (111) are in `npcs` with `invisible: true` when a click talks to them (the Mixing
+  Machine of the Mage quest); some answer nothing, so curiosity leaves them alone. Interior maps such as `prt_in` are
+  rooms whose doors all lead outside: a shop in another room is reached by `travel_into`, out and in again.
 - Interior maps hold several rooms (`geffen_in`), and some fields have closed-off parts (`prt_fild04`): a warp the bot
   cannot get to is refused with `No reachable cell from where target … can be used`. That warp is skipped for the trip
   only, not recorded. Into the shop's map, travel takes the warp landing nearest to the shop.
@@ -526,4 +551,26 @@ Still open:
 - Bad warps are learned per character (could be shared).
 - Server: `way_around_warps` (rust-ro `server/src/server/bots/command.rs`) could route long walks over the masked
   cells too; the bot's short legs work around it meanwhile.
-- Storage, pets, vending and the WebSocket API are out of scope for now.
+- Storage, pets, vending and the WebSocket API are out of scope for now. The rebirth only deposits into the storage;
+  nothing takes the items back out.
+- The Heart of Ymir's room of `yuno_in05` (region 3) is reached only through the random warps `#yun63`-`#yun75` of
+  rAthena's `npc/warps/cities/yuno.txt`. The server's conversion had left out every NPC of `npc/warps` written as a
+  script; since 2026-10-18 its `tools/scripts-import/convert_warp_scripts.py` lowers all of them (but the GM's
+  `#arenacontrol`) into the `towns_warps` module: the maze, the random warps of `alde_dun`/`c_tower`, `lhz_cube`,
+  `prt_maze03`, `pay_dun03` into `pay_dun04`, `gl_prison`, `kh_dun02`, `ve_fild06` and `aldeg_cas04`, the
+  conditional ones (`lhz_dun02` by level, `ra_san01`, `um_shaman1-1`, the Sewer Pipe of Lighthalzen) and the NPCs
+  around them (Moscovia's milestones and soldiers, the Abyss Lake columns). The quest is only offered when a route
+  leads into the Heart's room (`heart_reachable`). The route graph takes a random touch warp
+  (`Transport::random_warp`: touched, no checks, several landings, none within 3 cells of it on its own map, which
+  would be a refusal like `jawaiiwarp006`'s) as one edge per landing (`Edge::random`), inside a map or to others: a
+  route plans as if it lands where needed, and travel plans again from wherever it lands; a random warp is taken
+  once a walk onto it left the bot elsewhere, and is never marked bad. A random warp only matches an observed warp
+  standing where it does (`matching_warp`), as other warps share its landings. Clock Tower 4F's `clt027r`-`clt030r`
+  have a one-cell touch area in rAthena (`45,0,0`), which the server reads as none: they only work clicked, and the
+  graph does not take them. Live, 2026-10-18: Lancel went `veins` → `ve_fild06` → `ve_fild6-2` → `ve_fild05`. Live, 2026-10-18: Lancel (Swordsman 44) went from `yuno` through
+  the maze into the Heart's room in 16 random warps and 22 s (12 on average from the entrance, 10.5 at best;
+  `travel_into` allows 80 random ones besides its 30 legs), talked to the Heart from there, and walked back out.
+  Inside one map, a warp of the observation only matches an edge standing where it does (`matching_warp`): the
+  nearest one of the same destination had been `yun76`, out of reach. Untested live: the unburden rounds, the high first jobs, the
+  transcendent change, the Teleporter. The Bot API has no action to give back a Pushcart, Falcon or Peco Peco, which
+  the Valkyrie refuses.

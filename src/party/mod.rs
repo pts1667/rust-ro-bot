@@ -6,7 +6,8 @@
 //! leader creates the party, invites its friends, turns experience sharing on, and hunts where its strategist says,
 //! telling the party where. The others accept their friends' invitations and follow the leader: they walk to its
 //! map, keep near it, fight what attacks a member, then what the leader hits, then what is near the leader. Errands
-//! (selling, buying potions, a job change) still go first, with a word to the party.
+//! (selling, buying potions, a job change, a job quest) still go first, with a word to the party. The leader calls
+//! the party's town breaks, and the members join it in the town.
 
 pub mod chat;
 pub mod recruit;
@@ -47,6 +48,8 @@ const SHARE_EVERY: Duration = Duration::from_secs(120);
 const CHAT_GAP: Duration = Duration::from_secs(2);
 /// An errand someone announced is over after this long, even without a "back".
 const AWAY_LASTS: Duration = Duration::from_secs(600);
+/// Least time between telling one errand and another, while away.
+const ERRAND_RETELL: Duration = Duration::from_secs(60);
 const HEAL_REQUEST_LASTS: Duration = Duration::from_secs(20);
 const POTION_REQUEST_LASTS: Duration = Duration::from_secs(180);
 const ASK_POTIONS_EVERY: Duration = Duration::from_secs(300);
@@ -143,6 +146,8 @@ pub struct PartyPlay {
     announced_hunt: Option<String>,
     announced_level: Option<(u32, u32)>,
     errand: Option<String>,
+    /// When the errand was last told: a long one (a job quest) is told again before the others take it for over.
+    errand_told: Option<Instant>,
     asked_potions: Option<Instant>,
     asked_heal: Option<Instant>,
     /// When the bot last cast a buff on someone, by (name, skill): a player remembers it, nothing shows it.
@@ -153,6 +158,10 @@ pub struct PartyPlay {
     pub recruiting: recruit::Recruiting,
     /// The map last checked for following there, when, and whether the bot can.
     follow_check: Option<(String, Instant, bool)>,
+    /// The leader called a break in this town, for so many minutes; taken by the agent.
+    pub break_call: Option<(String, u32)>,
+    /// The leader ended its break.
+    pub break_over: bool,
 }
 
 impl PartyPlay {
@@ -174,12 +183,15 @@ impl PartyPlay {
             announced_hunt: None,
             announced_level: None,
             errand: None,
+            errand_told: None,
             asked_potions: None,
             asked_heal: None,
             buffs: HashMap::new(),
             trade_since: None,
             recruiting: recruit::Recruiting::new(last_seq),
             follow_check: None,
+            break_call: None,
+            break_over: false,
         }
     }
 
@@ -210,13 +222,25 @@ impl PartyPlay {
             }
             tracing::info!(from = %line.from, said = ?line.said, "party chat");
             let now = Instant::now();
+            let from_leader = leader
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case(&line.from));
             match line.said {
                 Said::Hunting(map) => {
-                    if leader
-                        .as_deref()
-                        .is_some_and(|l| l.eq_ignore_ascii_case(&line.from))
-                    {
+                    if from_leader {
                         self.hunt_map = Some(map);
+                    }
+                }
+                Said::Break { town, minutes } => {
+                    if from_leader {
+                        self.break_call = Some((town, minutes));
+                        self.break_over = false;
+                    }
+                }
+                Said::BreakOver => {
+                    if from_leader {
+                        self.break_call = None;
+                        self.break_over = true;
                     }
                 }
                 Said::FollowMe => {
@@ -371,7 +395,12 @@ pub fn attacking_a_member(
         .map(|m| (m.id, m.name.clone()))
 }
 
-fn errand_label(goal: &Goal) -> Option<String> {
+/// What the bot is away for, when its goal takes it from the party: `quest` is the quest the goal is a stage of. A job
+/// quest is one: a member that followed the leader never finished its own.
+fn errand_label(goal: &Goal, quest: Option<&str>) -> Option<String> {
+    if let Some(job) = quest.and_then(|q| q.strip_prefix("job:")) {
+        return Some(format!("doing the {job} job quest"));
+    }
     match goal {
         Goal::SellLoot => Some("selling loot".into()),
         Goal::BuyPotions => Some("buying potions".into()),
@@ -383,6 +412,14 @@ fn errand_label(goal: &Goal) -> Option<String> {
 
 fn leader_of(party: &Party) -> Option<&PartyMember> {
     party.members.iter().find(|m| m.leader)
+}
+
+/// The bot leads its party.
+pub fn leads(obs: &Observation) -> bool {
+    obs.party
+        .as_ref()
+        .and_then(leader_of)
+        .is_some_and(|l| l.name.eq_ignore_ascii_case(&obs.me.name))
 }
 
 /// Whether two job names are the same job (`Swordman`, `Swordsman`).
@@ -592,11 +629,13 @@ impl Bot {
     }
 
     /// The party's take on the next step: `None` lets the goal of the strategist run, as for a bot playing alone.
-    /// Errands go first; otherwise a member follows the leader and fights by its side.
+    /// Errands go first; otherwise a member follows the leader and fights by its side. `quest` is the quest the goal is
+    /// a stage of.
     pub async fn party_step(
         &mut self,
         obs: &Observation,
         goal: Option<&Goal>,
+        quest: Option<&str>,
     ) -> Result<Option<Outcome>> {
         let Some(play) = self.party.as_ref() else {
             return Ok(None);
@@ -604,14 +643,27 @@ impl Bot {
         if obs.party.is_none() {
             return Ok(None);
         }
-        let errand = goal.and_then(errand_label);
+        let errand = goal.and_then(|g| errand_label(g, quest));
         match (&errand, &play.errand) {
-            (Some(label), None) => {
-                self.say_to_party(Said::Away(label.clone())).await;
-                self.party.as_mut().expect("party play").errand = errand.clone();
+            // A new errand, another one, or a long one told again. A line the chat gap held back is said on a later
+            // tick: a leader's "brb" said a second after its "back" never reached the party. Away already, another
+            // errand waits `ERRAND_RETELL`: a bot going between a job quest and the shop said "brb" every 6 seconds
+            (Some(label), told) => {
+                let since = play.errand_told.map(|at| at.elapsed());
+                let tell = match told {
+                    None => true,
+                    Some(t) if t != label => since.is_none_or(|s| s >= ERRAND_RETELL),
+                    Some(_) => since.is_some_and(|s| s >= AWAY_LASTS / 2),
+                };
+                if tell && self.say_to_party(Said::Away(label.clone())).await {
+                    let play = self.party.as_mut().expect("party play");
+                    play.errand = errand.clone();
+                    play.errand_told = Some(Instant::now());
+                }
                 return Ok(None);
             }
-            (Some(_), Some(_)) => return Ok(None),
+            // Between two goals, as between the stages of a quest, the bot is not back yet
+            (None, Some(_)) if goal.is_none() => return Ok(None),
             (None, Some(_)) => {
                 if self.say_to_party(Said::Back).await {
                     self.party.as_mut().expect("party play").errand = None;
@@ -936,6 +988,32 @@ mod tests {
             attacking_a_member(&obs, &members, SIGHT).map(|(id, _)| id),
             Some(502)
         );
+    }
+
+    #[test]
+    fn a_job_quest_is_an_errand_and_the_leader_calls_the_breaks() {
+        let hunt = Goal::Hunt {
+            map: "pay_fild08".into(),
+        };
+        assert_eq!(errand_label(&hunt, None), None);
+        assert_eq!(errand_label(&hunt, Some("novice:first_aid")), None);
+        assert_eq!(
+            errand_label(&hunt, Some("job:Archer")).as_deref(),
+            Some("doing the Archer job quest")
+        );
+        let mut obs = observation();
+        let mut play = PartyPlay::new(config(), 0);
+        obs.messages = vec![party_line(1, "Gamma : break in payon for 5 min")];
+        play.hear(&obs);
+        assert_eq!(play.break_call, None, "only the leader calls a break");
+        obs.messages
+            .push(party_line(2, "Alpha : break in payon for 5 min"));
+        play.hear(&obs);
+        assert_eq!(play.break_call, Some(("payon".into(), 5)));
+        obs.messages
+            .push(party_line(3, "Alpha : break's over, let's go"));
+        play.hear(&obs);
+        assert!(play.break_over && play.break_call.is_none());
     }
 
     #[test]

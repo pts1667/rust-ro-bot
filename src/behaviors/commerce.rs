@@ -94,20 +94,69 @@ impl Bot {
         if obs.map.name != shop.map {
             return Ok(Outcome::failed(format!("the shop is on {}", shop.map)));
         }
-        if dist(obs.pos(), (shop.x, shop.y)) > 4 {
-            self.act(Action::Move {
-                x: shop.x,
-                y: shop.y.saturating_sub(2),
-                wait: true,
-            })
-            .await
-            .ok();
+        // The whole map is in sight, rooms of an interior map too: the shop's room first, through its doors
+        let room = obs
+            .npcs
+            .iter()
+            .filter(|n| dist((n.x, n.y), (shop.x, shop.y)) <= 3)
+            .min_by_key(|n| dist((n.x, n.y), (shop.x, shop.y)))
+            .and_then(|n| n.region);
+        if let Some(room) = room
+            && obs.me.region.is_some_and(|r| r != room)
+        {
+            match self.travel_into(&shop.map, room).await? {
+                Outcome::Done => {}
+                Outcome::Preempted => return Ok(Outcome::Preempted),
+                Outcome::Failed(why) => {
+                    return Ok(Outcome::failed(format!(
+                        "no way into the room of the shop at ({}, {}) on {}: {why}",
+                        shop.x, shop.y, shop.map
+                    )));
+                }
+            }
+        }
+        let mut walk_error = None;
+        if dist(self.observe().await?.pos(), (shop.x, shop.y)) > 4 {
+            // In front of the counter, else any side of it: the cell below the Tool Dealer of alberta_in is a wall
+            for (dx, dy) in [
+                (0, -2),
+                (0, 2),
+                (-2, 0),
+                (2, 0),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                let (Some(x), Some(y)) =
+                    (shop.x.checked_add_signed(dx), shop.y.checked_add_signed(dy))
+                else {
+                    continue;
+                };
+                match self.act(Action::Move { x, y, wait: true }).await {
+                    Ok(_) => {
+                        walk_error = None;
+                        break;
+                    }
+                    Err(error) => walk_error = Some(error.to_string()),
+                }
+            }
         }
         let obs = self.observe().await?;
         if Self::shop_npc(&obs, shop).is_none() {
             return Ok(Outcome::failed(format!(
                 "no shop NPC near ({}, {}) on {}",
                 shop.x, shop.y, shop.map
+            )));
+        }
+        // Seen is not reached: a shop across a wall left the bot walking to it 20 times a second
+        if dist(obs.pos(), (shop.x, shop.y)) > crate::agent::AT_SHOP {
+            return Ok(Outcome::failed(format!(
+                "could not walk to the shop at ({}, {}) on {}: {}",
+                shop.x,
+                shop.y,
+                shop.map,
+                walk_error.as_deref().unwrap_or("stopped short")
             )));
         }
         Ok(Outcome::Done)

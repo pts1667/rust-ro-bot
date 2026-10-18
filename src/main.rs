@@ -24,7 +24,7 @@ use clap::Parser;
 use tracing::Instrument;
 
 use api::{BotApi, Observation};
-use bot::Bot;
+use bot::{Bot, Outcome};
 use config::{Cli, Command, Endpoints, RunArgs};
 use knowledge::Knowledge;
 use knowledge::db::Db;
@@ -77,10 +77,23 @@ async fn main() -> Result<()> {
             let memory = Memory::load(&cli.endpoints.state_dir(), name)?;
             knowledge.graph.forbid(memory.bad_warps.iter().cloned());
             let mut bot = Bot::new(api, name.to_owned(), knowledge, memory, None);
-            for map in to {
-                let outcome = bot.travel(map).await?;
+            for place in to {
+                // `map#3`: into region 3 of the map
+                let (map, region) = match place.split_once('#') {
+                    Some((map, region)) => (map, region.parse().ok()),
+                    None => (place.as_str(), None),
+                };
+                let mut outcome = bot.travel(map).await?;
+                if let (Outcome::Done, Some(region)) = (&outcome, region) {
+                    outcome = bot.travel_into(map, region).await?;
+                }
                 let obs = bot.observe().await?;
-                println!("{map}: {outcome:?}: on {} at {:?}", obs.map.name, obs.pos());
+                println!(
+                    "{place}: {outcome:?}: on {} at {:?} in region {:?}",
+                    obs.map.name,
+                    obs.pos(),
+                    obs.me.region
+                );
             }
             bot.memory.save()?;
             Ok(())
@@ -303,7 +316,10 @@ async fn release_resting(endpoints: &Endpoints, playing: &[String], resting: &[S
     if resting.is_empty() {
         return;
     }
-    let listed = match endpoints.load_key().and_then(|key| BotApi::new(&endpoints.url, key)) {
+    let listed = match endpoints
+        .load_key()
+        .and_then(|key| BotApi::new(&endpoints.url, key))
+    {
         Ok(api) => api.list().await.map(|bots| (api, bots)),
         Err(error) => Err(error),
     };
@@ -311,7 +327,10 @@ async fn release_resting(endpoints: &Endpoints, playing: &[String], resting: &[S
         Ok(listed) => listed,
         Err(error) => {
             // Each bot reports what is wrong with the server when it joins
-            tracing::debug!(error = format!("{error:#}"), "could not list the bots in the game");
+            tracing::debug!(
+                error = format!("{error:#}"),
+                "could not list the bots in the game"
+            );
             return;
         }
     };
@@ -327,7 +346,10 @@ async fn release_resting(endpoints: &Endpoints, playing: &[String], resting: &[S
     if left.is_empty() {
         return;
     }
-    tracing::info!(count = left.len(), "logging out the resting characters an earlier run left in the game");
+    tracing::info!(
+        count = left.len(),
+        "logging out the resting characters an earlier run left in the game"
+    );
     let mut out = tokio::task::JoinSet::new();
     for name in left {
         let api = api.clone();
@@ -783,8 +805,15 @@ async fn db_command(cli: &Cli, knowledge: &Knowledge, path: &str, arg: &str) -> 
         return Ok(());
     }
     if path == "route" {
+        // `from:to#3` for a route into region 3 of `to`
         let (from, to) = arg.split_once(':').unwrap_or(("", arg));
-        let route = knowledge.graph.route(from, to, &HashSet::new()).await?;
+        let (to, region) = match to.split_once('#') {
+            Some((to, region)) => (to, region.parse().ok()),
+            None => (to, None),
+        };
+        let avoid = HashSet::new();
+        let trip = knowledge::graph::Trip::new(from, to, &avoid).ending_in(region);
+        let route = knowledge.graph.route_for(trip).await?;
         println!("{route:#?}");
         return Ok(());
     }

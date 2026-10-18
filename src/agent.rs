@@ -5,13 +5,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use rand::Rng;
 
 use crate::api::{Action, ApiError, Observation, dist};
+use crate::behaviors::town_break::{TownBreak, partied};
 use crate::bot::{Bot, Outcome};
 use crate::config::RunArgs;
 use crate::goap::state::{Extra, is_loot_item};
 use crate::goap::{Goal, PlanContext, Step, WorldState, plan};
 use crate::memory::Counters;
+use crate::party::chat::Said;
 use crate::social::Decision;
 use crate::social::help::HelpOutcome;
 use crate::strategist::options::JOB_MAP;
@@ -28,6 +31,18 @@ const SAVE_EVERY: Duration = Duration::from_secs(30);
 const LEAVE_WITHIN: Duration = Duration::from_secs(20 * 60);
 /// Most warps to the town a bot whose session is over heads for.
 const TOWN_HOPS: u32 = 8;
+/// Minutes of play between two town breaks, and before the first.
+const BREAK_EVERY: std::ops::Range<u64> = 50..70;
+const FIRST_BREAK: std::ops::Range<u64> = 10..50;
+/// A break that cannot start now (a quest, no town near) is tried again this much later.
+const BREAK_LATER: Duration = Duration::from_secs(5 * 60);
+/// Minutes a member's party break lasts beyond what the leader called, waiting for its "break's over".
+const MEMBER_BREAK_SPARE: u32 = 2;
+
+fn minutes_from_now(range: std::ops::Range<u64>) -> Instant {
+    Instant::now() + Duration::from_secs(rand::rng().random_range(range) * 60)
+}
+
 /// What a bot says to its party before it logs off.
 const GOODBYES: &[&str] = &[
     "gotta go, bye all",
@@ -101,6 +116,12 @@ struct Run {
     leaving: Option<Instant>,
     /// The town it heads for to log off, when one is in reach.
     leave_to: Option<String>,
+    /// The town break the bot is on.
+    town_break: Option<TownBreak>,
+    /// When the next town break is due; `None` without breaks.
+    next_break: Option<Instant>,
+    /// The goal taken for a stage of a quest, and the quest's id.
+    quest_goal: Option<(Goal, String)>,
 }
 
 /// The bot, the strategist's handle and the state of the run: what the loop works on.
@@ -131,6 +152,12 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Stop) -> Result<
         llm_base: bot.memory.counters.clone(),
         leaving: None,
         leave_to: None,
+        town_break: None,
+        next_break: args
+            .town_break
+            .rotates()
+            .then(|| minutes_from_now(FIRST_BREAK)),
+        quest_goal: None,
     };
     let started = Instant::now();
     let mut agent = Agent { bot, handle, run };
@@ -204,9 +231,45 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Stop) -> Result<
                 } else {
                     tracing::info!(map = %obs.map.name, "no town reached in time: logging off here");
                 }
+                if agent.run.town_break.is_some() {
+                    agent.end_break(&obs, "the session is over").await;
+                }
                 agent.say_goodbye(&obs).await;
                 break Ok(());
             }
+        }
+        // Taken now or never: a call heard on an errand is not followed when the errand is over
+        let call = agent.bot.party.as_mut().and_then(|p| p.break_call.take());
+        if let Some(b) = &mut agent.run.town_break {
+            // The party broke up: the break goes on as the bot's own
+            if b.with_party && !partied(&obs) {
+                b.with_party = false;
+            }
+            let called_off = b.with_party
+                && agent
+                    .bot
+                    .party
+                    .as_mut()
+                    .is_some_and(|p| std::mem::take(&mut p.break_over));
+            let end = if !b.with_party && partied(&obs) {
+                Some("found a party")
+            } else if called_off {
+                Some("the leader ended it")
+            } else if obs.me.dead {
+                Some("died")
+            } else if b.over() {
+                Some("the break is over")
+            } else {
+                None
+            };
+            if let Some(why) = end {
+                agent.end_break(&obs, why).await;
+            }
+        } else if agent.run.leaving.is_some() || obs.me.dead {
+        } else if let Some((town, minutes)) = call {
+            agent.join_party_break(&obs, town, minutes);
+        } else if agent.run.next_break.is_some_and(|at| Instant::now() >= at) {
+            agent.start_break(&obs, &args).await;
         }
         agent.detect_events(&obs);
         agent.run.prev = Some(obs.clone());
@@ -247,6 +310,106 @@ pub async fn run(bot: Bot, handle: Handle, args: RunArgs, stop: Stop) -> Result<
 }
 
 impl Agent {
+    /// The quest the current goal is a stage of.
+    fn current_quest(&self) -> Option<&str> {
+        self.run
+            .quest_goal
+            .as_ref()
+            .filter(|(g, _)| self.run.goal.as_ref() == Some(g))
+            .map(|(_, q)| q.as_str())
+    }
+
+    /// Away from the party on a goal of its own: a quest's talk, a favour, a job quest. Between two goals, the quest of
+    /// the last one: a break called in the second between two stages of a job quest held it up for the break.
+    fn busy(&self) -> bool {
+        let quest = match self.run.goal {
+            Some(_) => self.current_quest(),
+            None => self.run.quest_goal.as_ref().map(|(_, q)| q.as_str()),
+        };
+        matches!(self.run.goal, Some(Goal::Quest { .. } | Goal::Help { .. }))
+            || quest.is_some_and(|q| q.starts_with("job:"))
+    }
+
+    /// A break in the nearest town, as players take one, not in the middle of a quest or a favour. Alone, the break is
+    /// for finding a party; the leader of a party calls the break of the whole party, and a member waits for that.
+    async fn start_break(&mut self, obs: &Observation, args: &RunArgs) {
+        let with_party = partied(obs);
+        if with_party && !crate::party::leads(obs) {
+            tracing::debug!("in a party: the leader calls the breaks");
+            self.run.next_break = Some(minutes_from_now(BREAK_EVERY));
+            return;
+        }
+        if self.busy() {
+            self.run.next_break = Some(Instant::now() + BREAK_LATER);
+            return;
+        }
+        let town = if self.bot.is_town(&obs.map.name).await {
+            Some(obs.map.name.clone())
+        } else {
+            self.nearest_town(&obs.map.name).await
+        };
+        let Some(town) = town else {
+            self.run.next_break = Some(Instant::now() + BREAK_LATER);
+            return;
+        };
+        let length = args.town_break.pick();
+        let minutes = (length.as_secs() / 60) as u32;
+        tracing::info!(%town, minutes, with_party, "time for a break in town");
+        let mut b = TownBreak::new(town.clone(), length);
+        if with_party {
+            b = b.of_party();
+            self.say_surely(Said::Break { town, minutes }).await;
+        }
+        self.run.town_break = Some(b);
+    }
+
+    /// The leader called a break in `town`: the member goes there too, unless it is away on a goal of its own.
+    fn join_party_break(&mut self, obs: &Observation, town: String, minutes: u32) {
+        if self.busy() || !partied(obs) {
+            tracing::info!(%town, "the party takes a break, the bot carries on");
+            return;
+        }
+        tracing::info!(%town, minutes, "the party takes a break in town");
+        // The leader's "break's over" ends it; the bot's own time is for when that line is missed. A member there before
+        // the leader got up a minute before it
+        let length = Duration::from_secs(u64::from(minutes.clamp(1, 30) + MEMBER_BREAK_SPARE) * 60);
+        self.run.town_break = Some(TownBreak::new(town, length).of_party());
+        self.run.next_break = Some(minutes_from_now(BREAK_EVERY));
+    }
+
+    /// Says it to the party, after the gap between two lines when one was just said.
+    async fn say_surely(&mut self, said: Said) {
+        if !self.bot.say_to_party(said.clone()).await {
+            Bot::pause(2100).await;
+            self.bot.say_to_party(said).await;
+        }
+    }
+
+    /// The break ends: the store and the chat room close, and the strategist picks what comes next.
+    async fn end_break(&mut self, obs: &Observation, why: &str) {
+        let Some(b) = self.run.town_break.take() else {
+            return;
+        };
+        tracing::info!(town = %b.town, %why, "the town break ends");
+        self.bot.end_town_break(obs).await;
+        if b.with_party && crate::party::leads(obs) {
+            self.say_surely(Said::BreakOver).await;
+        }
+        self.run.next_break = Some(minutes_from_now(BREAK_EVERY));
+        if self.run.goal
+            == Some(Goal::Explore {
+                map: b.town.clone(),
+            })
+        {
+            self.run.goal = None;
+        }
+        self.run.last_outcome = format!("town break in {} over: {why}", b.town);
+        self.handle
+            .events
+            .send(Event::GoalDone(format!("a break in {}", b.town)))
+            .ok();
+    }
+
     /// The town fewest warps from `from`, within `TOWN_HOPS`.
     async fn nearest_town(&self, from: &str) -> Option<String> {
         let maps = self
@@ -299,7 +462,7 @@ impl Agent {
 }
 
 /// How far from its shop spot the bot still stands at the shop.
-const AT_SHOP: u32 = 6;
+pub const AT_SHOP: u32 = 6;
 
 fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
     // Only where the shop is: following the leader takes the bot away without a step that clears the flag, and every
@@ -328,7 +491,7 @@ fn world_state(bot: &Bot, obs: &Observation) -> WorldState {
     if bot
         .skills_stuck_at
         .as_ref()
-        .is_some_and(|(job, lvl)| *job == obs.me.job && *lvl == obs.me.job_level)
+        .is_some_and(|(job, lvl)| *job == obs.me.class && *lvl == obs.me.job_level)
     {
         ws.skill_points = false;
     }
@@ -363,6 +526,13 @@ impl Agent {
 
     async fn tick(&mut self, obs: Observation) -> Result<()> {
         self.bot.knowledge.learn_heals(&obs).await;
+        // The line a rebirth follows: the second job, kept once the class no longer shows it
+        if !obs.me.reborn
+            && obs.me.past_job.is_some()
+            && self.bot.memory.past_job != obs.me.past_job
+        {
+            self.bot.memory.past_job = obs.me.past_job.clone();
+        }
         // Reflexes come before any goal.
         if obs.me.dead {
             tracing::info!("dead: respawning");
@@ -417,7 +587,9 @@ impl Agent {
         }
         let mut ws = world_state(&self.bot, &obs);
         // A Novice without a job holds its points: the strategist picks the job first, and its build decides where they go
+        // A High Novice's job is the one of its line
         let awaits_job = obs.me.job.eq_ignore_ascii_case("novice")
+            && !obs.me.reborn
             && self.bot.memory.strategy.job_target.is_none()
             && self.bot.memory.strategy.pinned_jobs.is_empty();
         if ws.status_points && !awaits_job {
@@ -467,6 +639,10 @@ impl Agent {
                     .insert(id.to_owned(), Default::default());
                 self.bot.keep = crate::quests::kept_items(&self.bot.memory.quests);
             }
+            // A favour asked of a bot on a break ends the break; other goals wait for its end
+            if self.run.town_break.is_some() && matches!(d.goal, Goal::Help { .. }) {
+                self.end_break(&obs, "asked for a favour").await;
+            }
             if self.run.ended_favour.as_ref() == Some(&d.goal) {
                 tracing::debug!(goal = %d.goal.label(), "a favour that is over, not taken up again");
             } else if self
@@ -477,8 +653,14 @@ impl Agent {
             {
                 // Decided before the goal failed
                 tracing::debug!(goal = %d.goal.label(), "a goal given up lately, not taken up again");
+            } else if self.run.town_break.is_some() {
+                tracing::debug!(goal = %d.goal.label(), "on a break: the goal waits");
             } else if self.run.leave_to.is_none() && self.run.goal.as_ref() != Some(&d.goal) {
                 tracing::info!(goal = %d.goal.label(), reason = %d.reason, by_llm = d.by_llm, "new goal");
+                self.run.quest_goal = d
+                    .option
+                    .strip_prefix("quest:")
+                    .map(|q| (d.goal.clone(), q.to_owned()));
                 self.run.goal = Some(d.goal);
                 self.run.goal_since = Instant::now();
                 self.run.step_failures = 0;
@@ -497,6 +679,39 @@ impl Agent {
                 self.run.goal = Some(goal);
                 self.run.goal_since = Instant::now();
                 self.run.step_failures = 0;
+            }
+        }
+        // A bot on a break walks to its town, and there sits among the others
+        if self.run.leave_to.is_none()
+            && let Some(mut b) = self.run.town_break.take()
+        {
+            if obs.map.name == b.town {
+                self.publish(&obs, &ws);
+                let step = self.bot.town_break_step(&obs, &mut b).await;
+                self.run.town_break = Some(b);
+                self.run.last_outcome = "on a break in town".into();
+                return step;
+            }
+            let goal = Goal::Explore {
+                map: b.town.clone(),
+            };
+            let failed = self
+                .run
+                .failures
+                .iter()
+                .any(|(g, at)| *g == goal && at.elapsed() < FAILURE_MEMORY);
+            if failed {
+                tracing::info!(town = %b.town, "the town of the break is out of reach: no break");
+                self.run.town_break = Some(b);
+                self.end_break(&obs, "the town is out of reach").await;
+            } else {
+                if self.run.goal.as_ref() != Some(&goal) {
+                    tracing::info!(town = %b.town, "heading for a town for a break");
+                    self.run.goal = Some(goal);
+                    self.run.goal_since = Instant::now();
+                    self.run.step_failures = 0;
+                }
+                self.run.town_break = Some(b);
             }
         }
         self.publish(&obs, &ws);
@@ -528,8 +743,12 @@ impl Agent {
             return Ok(());
         }
         // In a party, following the leader replaces the hunt; errands still run as planned. A bot on its way out goes alone.
+        let quest = self.current_quest().map(str::to_owned);
         if self.run.leave_to.is_none()
-            && let Some(outcome) = self.bot.party_step(&obs, self.run.goal.as_ref()).await?
+            && let Some(outcome) = self
+                .bot
+                .party_step(&obs, self.run.goal.as_ref(), quest.as_deref())
+                .await?
         {
             self.run.last_outcome = match outcome {
                 Outcome::Failed(reason) => format!("with the party: {reason}"),
@@ -544,6 +763,11 @@ impl Agent {
 
         if goal.satisfied(&ws) {
             tracing::info!(goal = %goal.label(), "goal reached");
+            // Met as soon as taken (rest at full HP, when nothing else is offered): the strategist would hand it
+            // straight back, twice a second
+            if self.run.goal_since.elapsed() < Duration::from_secs(2) {
+                Bot::pause(5000).await;
+            }
             self.run.last_outcome = format!("{} done", goal.label());
             self.run.goal = None;
             self.handle.events.send(Event::GoalDone(goal.label())).ok();

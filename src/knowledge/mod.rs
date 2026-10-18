@@ -1,6 +1,7 @@
 //! What the bot knows about the game besides its observation: the server's `/db` reference, the warp graph,
 //! a fight model and hunting-ground scoring.
 
+pub mod classes;
 pub mod combat;
 pub mod db;
 pub mod gear;

@@ -1,15 +1,20 @@
 //! Carrying out the stages of a quest: talking to its NPCs, fighting its tests, queueing in its waiting rooms.
 //! Gathering items is not done here: the strategist sends the bot to buy or hunt them (`strategist::options`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
 use super::dialog::{Intent, dialog_of};
-use crate::api::{Action, Observation, dist};
+use crate::api::client::MapGrid;
+use crate::api::{Action, BuyLine, Observation, SellLine, dist};
 use crate::bot::{Bot, Outcome};
-use crate::quests::{self, Act, Dance, Fight, Quest, QuestProgress, Talk, assigned_set, stage_map};
+use crate::memory::ShopSpot;
+use crate::quests::{
+    self, Act, Check, Dance, Fight, Quest, QuestProgress, Talk, Trap, Unburden, assigned_set,
+    normalize, stage_map, trapped,
+};
 
 /// Tries of one stage before the quest is left alone for a while.
 const MAX_ATTEMPTS: u32 = 4;
@@ -21,6 +26,65 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ROOM_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// HP share under which a potion is taken during a test.
 const TEST_HEAL_AT: f32 = 0.5;
+/// Rounds of spending and storing when leaving everything behind: each takes what the weight limit lets the bot buy.
+const UNBURDEN_ROUNDS: u32 = 12;
+/// The Free Ticket for Kafra Storage, which a Kafra takes in place of the fee.
+const FREE_TICKET: u32 = 7059;
+/// Slots of the inventory.
+const INVENTORY_SLOTS: u32 = 100;
+/// Most of one item in a slot.
+const STACK: u64 = 30_000;
+
+/// A shop's ware: its price there, its weight, whether it stacks into one slot.
+#[derive(Debug, Clone, Copy)]
+struct Ware {
+    item_id: u32,
+    price: u64,
+    weight: u32,
+    stacks: bool,
+}
+
+/// What to buy of a shop's wares to spend `zeny` and no more, within `room` weight and `slots` free inventory slots
+/// (`held`: items carried, whose stacks take no new slot): the dearest first, so that each weight carried takes the
+/// most zeny, down to the cheapest for the change.
+fn spending(wares: &[Ware], zeny: u64, room: u32, slots: u32, held: &[u32]) -> Vec<(u32, u32)> {
+    let mut wares: Vec<&Ware> = wares.iter().filter(|w| w.price > 0).collect();
+    wares.sort_by_key(|w| std::cmp::Reverse(w.price));
+    let (mut zeny, mut room, mut slots) = (zeny, room, slots);
+    let mut out = Vec::new();
+    for w in wares {
+        let new_slot = !held.contains(&w.item_id);
+        let mut n = zeny / w.price;
+        if w.weight > 0 {
+            n = n.min(u64::from(room / w.weight));
+        }
+        n = match (w.stacks, new_slot && slots == 0) {
+            (true, true) => 0,
+            (true, false) => n.min(STACK),
+            (false, _) => n.min(u64::from(slots)),
+        };
+        if n == 0 {
+            continue;
+        }
+        let n = n as u32;
+        zeny -= w.price * u64::from(n);
+        room -= w.weight * n;
+        slots -= if w.stacks { u32::from(new_slot) } else { n };
+        out.push((w.item_id, n));
+    }
+    out
+}
+
+/// A shop of a quest, as the commerce behaviour walks to them.
+fn spot(map: &str, name: &str, x: u16, y: u16) -> ShopSpot {
+    ShopSpot {
+        map: map.to_owned(),
+        x,
+        y,
+        name: name.to_owned(),
+        price: 0,
+    }
+}
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -43,6 +107,66 @@ fn leg(from: (u16, u16), to: (u16, u16)) -> (u16, u16) {
     (step(from.0, to.0), step(from.1, to.1))
 }
 
+/// The shortest walk from `from` to `to` over walkable cells outside the traps, one cell at a time without diagonals
+/// (a diagonal step could cut the corner of a trap).
+fn safe_path(
+    grid: &MapGrid,
+    avoid: &[Trap],
+    from: (u16, u16),
+    to: (u16, u16),
+) -> Option<Vec<(u16, u16)>> {
+    let safe = |c: (u16, u16)| grid.walkable(c.0, c.1) && !trapped(avoid, c);
+    if !safe(to) {
+        return None;
+    }
+    let mut came: HashMap<(u16, u16), (u16, u16)> = HashMap::new();
+    let mut queue = VecDeque::from([from]);
+    came.insert(from, from);
+    while let Some(c) = queue.pop_front() {
+        if c == to {
+            let mut path = vec![c];
+            let mut at = c;
+            while at != from {
+                at = came[&at];
+                path.push(at);
+            }
+            path.reverse();
+            return Some(path);
+        }
+        let (x, y) = c;
+        let next = [
+            (x.wrapping_add(1), y),
+            (x.wrapping_sub(1), y),
+            (x, y.wrapping_add(1)),
+            (x, y.wrapping_sub(1)),
+        ];
+        for n in next {
+            if safe(n) && !came.contains_key(&n) {
+                came.insert(n, c);
+                queue.push_back(n);
+            }
+        }
+    }
+    None
+}
+
+/// The ends of the straight stretches of a path, each at most `LEG` cells: walked one after the other, the walk
+/// keeps to the path.
+fn straight_legs(path: &[(u16, u16)]) -> Vec<(u16, u16)> {
+    const LEG: usize = 8;
+    let dir = |a: (u16, u16), b: (u16, u16)| (b.0 as i32 - a.0 as i32, b.1 as i32 - a.1 as i32);
+    let mut legs = Vec::new();
+    let mut start = 0;
+    for i in 1..path.len() {
+        let turns = i + 1 < path.len() && dir(path[i - 1], path[i]) != dir(path[i], path[i + 1]);
+        if turns || i - start >= LEG || i + 1 == path.len() {
+            legs.push(path[i]);
+            start = i;
+        }
+    }
+    legs
+}
+
 /// The name an NPC shows, without the `#suffix` of its script name.
 fn shown_name(name: &str) -> &str {
     name.split('#').next().unwrap_or(name).trim()
@@ -56,6 +180,8 @@ struct Walk<'a> {
     area: Option<Area>,
     /// Menu entries to pick, of those that speak up on the way.
     menu: &'a [&'a str],
+    /// Cells never to step on.
+    avoid: &'a [Trap],
     /// Quiz answers, of those that speak up on the way.
     answers: &'a [(&'a str, &'a str)],
     /// What the walk is for: the goal of a dialog on the way.
@@ -86,6 +212,22 @@ impl Bot {
             self.memory.quests.insert(id.to_owned(), progress);
             return Ok(Outcome::failed("quest went through without its reward"));
         };
+        // A stage that gives what an NPC said to remember, with nothing remembered (memory lost): back to that NPC.
+        if let Act::Talk(talk) = &stage.act
+            && progress.remembered.is_none()
+            && talk.steps.iter().any(|s| s.contains("{remembered}"))
+            && let Some(back) = quest.stages[..i]
+                .iter()
+                .rposition(|s| matches!(&s.act, Act::Talk(t) if !t.remembers.is_empty()))
+        {
+            self.memory.note(format!(
+                "{}: forgot what to tell, asking again at '{}'",
+                quest.title, quest.stages[back].what
+            ));
+            progress.stage = back;
+            self.memory.quests.insert(id.to_owned(), progress);
+            return Ok(Outcome::failed("nothing remembered to tell"));
+        }
         progress.stage = i;
         if progress.branch.is_none() {
             progress.branch = quest.branch(&progress, &obs).map(str::to_owned);
@@ -101,7 +243,10 @@ impl Bot {
         );
         self.last_dialog.clear();
         let outcome = match &stage.act {
-            Act::Talk(talk) => self.quest_talk(talk, stage.what).await?,
+            Act::Talk(talk) => {
+                self.quest_talk(talk, stage.what, progress.remembered.as_deref())
+                    .await?
+            }
             Act::Fight(fight) => self.quest_fight(fight, stage.area).await?,
             Act::Endure { map } => self.quest_endure(map).await?,
             Act::Walk {
@@ -110,6 +255,7 @@ impl Bot {
                 y,
                 menu,
                 answers,
+                avoid,
             } => {
                 let walk = Walk {
                     map,
@@ -117,12 +263,14 @@ impl Bot {
                     area: stage.area,
                     menu,
                     answers,
+                    avoid,
                     what: stage.what,
                 };
                 self.quest_walk(walk).await?
             }
             Act::Room { map, npc } => self.quest_room(map, npc).await?,
             Act::Dance(dance) => self.quest_dance(dance).await?,
+            Act::Unburden(u) => self.quest_unburden(u, stage.what).await?,
             Act::Gather(_) => Outcome::failed("items still missing"),
         };
         let after = self.observe().await?;
@@ -148,6 +296,16 @@ impl Bot {
                 ));
                 progress.assigned = set;
             }
+        }
+        if let Act::Talk(talk) = &stage.act
+            && let Some(value) = talk
+                .remembers
+                .iter()
+                .find(|v| said.iter().any(|l| normalize(l).contains(&normalize(v))))
+        {
+            self.memory
+                .note(format!("{}: to remember: {value}", quest.title));
+            progress.remembered = Some((*value).to_owned());
         }
         let done = match (&stage.act, stage.done.is_empty()) {
             (_, true) => outcome == Outcome::Done,
@@ -252,13 +410,18 @@ impl Bot {
             .or_else(|| {
                 obs.npcs
                     .iter()
-                    .filter(|n| dist((n.x, n.y), (talk.x, talk.y)) <= 1)
+                    .filter(|n| !n.invisible && dist((n.x, n.y), (talk.x, talk.y)) <= 1)
                     .min_by_key(|n| dist((n.x, n.y), (talk.x, talk.y)))
             })
             .map(|n| (n.id, n.region))
     }
 
-    async fn quest_talk(&mut self, talk: &Talk, what: &str) -> Result<Outcome> {
+    async fn quest_talk(
+        &mut self,
+        talk: &Talk,
+        what: &str,
+        remembered: Option<&str>,
+    ) -> Result<Outcome> {
         let obs = self.observe().await?;
         if obs.map.name != talk.map {
             return Ok(Outcome::failed(format!("{} is on {}", talk.npc, talk.map)));
@@ -266,6 +429,7 @@ impl Bot {
         let Some((npc, region)) = Self::quest_npc(&obs, talk) else {
             return Ok(Outcome::failed(format!("no {} on {}", talk.npc, talk.map)));
         };
+        let region = region.or(talk.room);
         // In another room of the map: through the warps between rooms first.
         if let (Some(to), Some(at)) = (region, obs.me.region)
             && to != at
@@ -289,6 +453,11 @@ impl Bot {
             recite: talk.recite,
             strict: false,
             curious: false,
+            steps: talk
+                .steps
+                .iter()
+                .map(|s| s.replace("{remembered}", remembered.unwrap_or_default()))
+                .collect(),
         };
         let mut said = Vec::new();
         for n in 0..talk.times.max(1) {
@@ -438,6 +607,157 @@ impl Bot {
         .ok();
     }
 
+    /// Leaves everything behind (`Act::Unburden`): the zeny spent down to the storage fee at the shops of the map,
+    /// then every item, worn ones too, put into the Kafra storage. As many rounds of buying and storing as the weight
+    /// the bot carries asks for; what the storage refuses is sold, and its zeny spent the next round.
+    async fn quest_unburden(&mut self, u: &Unburden, what: &str) -> Result<Outcome> {
+        let kafra = Talk {
+            map: u.map,
+            npc: u.kafra.0,
+            x: u.kafra.1,
+            y: u.kafra.2,
+            menu: &["Use Storage"],
+            answers: &[],
+            assigns: &[],
+            times: 1,
+            recite: false,
+            steps: &[],
+            remembers: &[],
+            room: None,
+        };
+        let fee_of = |obs: &Observation| {
+            if obs.item_count(FREE_TICKET) > 0 {
+                0
+            } else {
+                u.fee
+            }
+        };
+        let mut refused: Vec<u32> = Vec::new();
+        for _ in 0..UNBURDEN_ROUNDS {
+            let obs = self.observe().await?;
+            if obs.map.name != u.map {
+                return Ok(Outcome::failed(format!(
+                    "the Kafra storage is on {}",
+                    u.map
+                )));
+            }
+            if Check::Bare.holds(&obs, &[]) {
+                return Ok(Outcome::Done);
+            }
+            // What the storage refused, or everything when the fee is short, goes to the shop
+            let sell_all = obs.me.zeny < fee_of(&obs);
+            if (!refused.is_empty() || sell_all)
+                && let Some(&(name, x, y)) = u.shops.last()
+            {
+                let lines: Vec<SellLine> = obs
+                    .inventory
+                    .iter()
+                    .filter(|i| !i.equipped && (sell_all || refused.contains(&i.item_id)))
+                    .map(|i| SellLine {
+                        index: i.index,
+                        amount: i.amount,
+                    })
+                    .collect();
+                let shop = spot(u.map, name, x, y);
+                if !lines.is_empty()
+                    && self.walk_to_spot(&shop).await? == Outcome::Done
+                    && self.open_shop_at(&shop, "sell").await?.is_some()
+                    && let Err(error) = self.act(Action::DialogSell { items: lines }).await
+                {
+                    tracing::warn!(%error, "the shop bought nothing of what is left");
+                }
+                refused.clear();
+            }
+            for &(name, x, y) in u.shops {
+                let obs = self.observe().await?;
+                let fee = fee_of(&obs);
+                if obs.me.zeny <= fee {
+                    break;
+                }
+                let shop = spot(u.map, name, x, y);
+                if self.walk_to_spot(&shop).await? != Outcome::Done {
+                    continue;
+                }
+                let Some(dialog) = self.open_shop_at(&shop, "buy").await? else {
+                    continue;
+                };
+                let mut wares = Vec::new();
+                for line in dialog.prompt.map(|p| p.items).unwrap_or_default() {
+                    let Ok(item) = self.knowledge.db.item(line.item_id).await else {
+                        continue;
+                    };
+                    wares.push(Ware {
+                        item_id: line.item_id,
+                        price: line.price,
+                        weight: item.weight,
+                        stacks: item.location == 0,
+                    });
+                }
+                let held: Vec<u32> = obs.inventory.iter().map(|i| i.item_id).collect();
+                let room = (obs.me.max_weight * 9 / 10).saturating_sub(obs.me.weight);
+                let slots = INVENTORY_SLOTS.saturating_sub(obs.inventory.len() as u32);
+                let items: Vec<BuyLine> = spending(&wares, obs.me.zeny - fee, room, slots, &held)
+                    .into_iter()
+                    .map(|(item_id, amount)| BuyLine { item_id, amount })
+                    .collect();
+                if items.is_empty() {
+                    self.act(Action::DialogClose).await.ok();
+                    continue;
+                }
+                if let Err(error) = self.act(Action::DialogBuy { items }).await {
+                    tracing::warn!(%error, shop = name, "buying to spend the zeny refused");
+                }
+            }
+            let obs = self.observe().await?;
+            if obs.me.zeny < fee_of(&obs) {
+                continue;
+            }
+            match self.quest_talk(&kafra, what, None).await? {
+                Outcome::Done => {}
+                other => return Ok(other),
+            }
+            let open = self.observe().await?;
+            if open.storage.is_none() {
+                return Ok(Outcome::failed("the Kafra did not open the storage"));
+            }
+            for item in open.inventory.iter().filter(|i| i.equipped) {
+                if let Err(error) = self.act(Action::Unequip { index: item.index }).await {
+                    tracing::warn!(%error, item = item.name, "could not take off an item to store it");
+                }
+            }
+            for item in self.observe().await?.inventory {
+                if let Err(error) = self
+                    .act(Action::StorageDeposit {
+                        index: item.index,
+                        amount: item.amount,
+                    })
+                    .await
+                {
+                    tracing::info!(%error, item = item.name, "the storage refused an item");
+                    refused.push(item.item_id);
+                }
+            }
+            self.act(Action::StorageClose).await.ok();
+            let after = self.observe().await?;
+            self.memory.note(format!(
+                "left {} items in the storage, {} z and {} items still carried",
+                open.inventory.len().saturating_sub(after.inventory.len()),
+                after.me.zeny,
+                after.inventory.len()
+            ));
+        }
+        let obs = self.observe().await?;
+        Ok(if Check::Bare.holds(&obs, &[]) {
+            Outcome::Done
+        } else {
+            Outcome::failed(format!(
+                "still carrying {} z and {} items",
+                obs.me.zeny,
+                obs.inventory.len()
+            ))
+        })
+    }
+
     /// Stands on a test map without attacking until the script sends the bot away.
     async fn quest_endure(&mut self, map: &str) -> Result<Outcome> {
         self.act(Action::Stop).await.ok();
@@ -464,6 +784,7 @@ impl Bot {
             area,
             menu,
             answers,
+            avoid,
             what,
         } = walk;
         let start = Instant::now();
@@ -505,6 +826,12 @@ impl Bot {
             if self.heal_in_test(&obs).await {
                 continue;
             }
+            if !avoid.is_empty() {
+                if let Some(failed) = self.walk_around(&obs, to, avoid).await? {
+                    return Ok(failed);
+                }
+                continue;
+            }
             // A straight short leg, or the whole way when a wall stands in the straight line (a maze).
             let step = leg(obs.pos(), to);
             if self
@@ -533,6 +860,56 @@ impl Bot {
             "did not reach ({}, {}) on {map}",
             to.0, to.1
         )))
+    }
+
+    /// Walks the safe way towards `to`, keeping off the traps, a stretch at a time; with no safe way there (fallen
+    /// into a pit), onto the nearest warp of the map, which leads back. `Some` ends the walk as failed.
+    async fn walk_around(
+        &mut self,
+        obs: &Observation,
+        to: (u16, u16),
+        avoid: &[Trap],
+    ) -> Result<Option<Outcome>> {
+        let me = obs.pos();
+        // The square around both ends, with room to go round
+        let mid = ((me.0 + to.0) / 2, (me.1 + to.1) / 2);
+        let half = me.0.abs_diff(to.0).max(me.1.abs_diff(to.1)) / 2;
+        let grid = self
+            .api
+            .map_grid(&self.name, mid.0, mid.1, (half + 30).clamp(40, 250))
+            .await?;
+        let path = safe_path(&grid, avoid, me, to).or_else(|| {
+            obs.warps
+                .iter()
+                .filter(|w| w.to_map == obs.map.name)
+                .filter_map(|w| safe_path(&grid, avoid, me, (w.x, w.y)))
+                .min_by_key(Vec::len)
+        });
+        let Some(path) = path else {
+            return Ok(Some(Outcome::failed(format!(
+                "no safe way to ({}, {}) on {}",
+                to.0, to.1, obs.map.name
+            ))));
+        };
+        for cell in straight_legs(&path) {
+            if let Err(error) = self
+                .act(Action::Move {
+                    x: cell.0,
+                    y: cell.1,
+                    wait: true,
+                })
+                .await
+            {
+                tracing::debug!(%error, ?cell, "safe walk refused");
+                return Ok(None);
+            }
+            // Sent elsewhere (a gate, a pit) or stopped by a dialog: look again.
+            let now = self.observe().await?;
+            if now.map.name != obs.map.name || now.pos() != cell || now.dialog.is_some() {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 
     /// Joins the waiting room of an NPC and waits for the script to send the bot on.
@@ -698,6 +1075,7 @@ pub fn stage_place(quest: &Quest, i: usize) -> Option<(&'static str, (u16, u16))
         Act::Talk(t) => (t.x, t.y),
         Act::Walk { x, y, .. } => (*x, *y),
         Act::Dance(d) => d.end,
+        Act::Unburden(u) => (u.kafra.1, u.kafra.2),
         _ => (0, 0),
     };
     Some((map, spot))
@@ -711,6 +1089,62 @@ pub fn awake(progress: Option<&QuestProgress>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_zeny_is_spent_to_the_fee_dearest_first() {
+        let ware = |item_id, price, weight, stacks| Ware {
+            item_id,
+            price,
+            weight,
+            stacks,
+        };
+        // Mr. King's breastplates for the bulk, then the Tool Dealer's potions and Arrows for the change
+        let wares = [
+            ware(1750, 1, 1, true),
+            ware(2340, 89_000, 500, false),
+            ware(504, 1_200, 150, true),
+        ];
+        let buy = spending(&wares, 1_000_000, 10_000, 50, &[]);
+        assert_eq!(buy, vec![(2340, 11), (504, 17), (1750, 600)]);
+        let spent: u64 = buy
+            .iter()
+            .map(|(id, n)| wares.iter().find(|w| w.item_id == *id).unwrap().price * u64::from(*n))
+            .sum();
+        assert_eq!(spent, 1_000_000);
+        // Too little room: the weight limit stops it, and the rest waits for the next round
+        let buy = spending(&wares, 1_000_000, 1_000, 50, &[]);
+        assert_eq!(buy[0], (2340, 2));
+        // No free slot: only a stack already carried grows
+        assert_eq!(spending(&wares, 100, 1_000, 0, &[1750]), vec![(1750, 100)]);
+        assert!(spending(&wares, 100, 1_000, 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_safe_path_goes_round_the_pits() {
+        // A corridor of 5 rows; a pit across the middle row and the one above it, open at the top.
+        let grid = MapGrid {
+            x_min: 0,
+            y_min: 0,
+            y_max: 4,
+            rows: vec!["..........".into(); 5],
+        };
+        const PITS: &[Trap] = &[(5, 1, 0, 1), (5, 3, 0, 0)];
+        let path = safe_path(&grid, PITS, (0, 2), (9, 2)).unwrap();
+        assert!(path.iter().all(|c| !trapped(PITS, *c)));
+        assert_eq!(path.first(), Some(&(0, 2)));
+        assert_eq!(path.last(), Some(&(9, 2)));
+        assert!(path.contains(&(5, 4)));
+        let legs = straight_legs(&path);
+        assert_eq!(legs.last(), Some(&(9, 2)));
+        // Each leg is straight: one coordinate stays.
+        let mut from = (0, 2);
+        for leg in legs {
+            assert!(leg.0 == from.0 || leg.1 == from.1, "{from:?} -> {leg:?}");
+            from = leg;
+        }
+        // A pit across the whole corridor: no way.
+        assert!(safe_path(&grid, &[(5, 2, 0, 2)], (0, 2), (9, 2)).is_none());
+    }
 
     #[test]
     fn a_dance_call_ends_on_the_move_it_names_last() {

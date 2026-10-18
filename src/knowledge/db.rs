@@ -15,6 +15,9 @@ use serde_json::Value;
 pub const MD_AGGRESSIVE: u32 = 0x4;
 pub const MD_ANGRY: u32 = 0x800;
 
+/// Cells from a random warp within which a landing on its own map is a refusal, not a random place.
+const RANDOM_LANDING_OFF: u16 = 3;
+
 #[derive(Clone)]
 pub struct Db {
     http: reqwest::Client,
@@ -70,6 +73,8 @@ pub struct Transport {
     /// What the NPC's script checks first (`zeny`, `item`, `quest`, `level`, `job`, `variable`): the way has a
     /// condition.
     pub checks: Vec<String>,
+    /// Walking into its area is what sends a character on (a warp written as a script), not talking to it.
+    pub touch: bool,
     /// The places it sends to; a warper's is a link to `/db/destinations` instead, so it is read loosely: a map that
     /// failed to parse dropped out of the graph, and with it every town that has a warper.
     pub to: serde_json::Value,
@@ -92,6 +97,20 @@ impl Transport {
                 ))
             })
             .collect()
+    }
+
+    /// A random warp of `map`: stepped on, it sends anyone to one of several places at random, of the same map (the
+    /// maze of `yuno_in05` before the Heart of Ymir, the cubes of `lhz_cube`) or of others (the Clock Tower and its
+    /// basement). A landing next to the warp is no random place but where a condition the reference does not name
+    /// sends back whoever it refuses (`jawaiiwarp006` of `jawaii_in`, for the married).
+    pub fn random_warp(&self, map: &str) -> bool {
+        let to = self.destinations();
+        self.touch
+            && self.checks.is_empty()
+            && to.len() > 1
+            && to.iter().all(|(m, x, y, _)| {
+                m != map || x.abs_diff(self.x).max(y.abs_diff(self.y)) > RANDOM_LANDING_OFF
+            })
     }
 
     /// Whether the NPC leads to `map`, but only under a condition.

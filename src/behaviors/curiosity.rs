@@ -219,6 +219,7 @@ impl Bot {
                 let name = shown_name(&n.name);
                 let key = npc_key(map, &n.name);
                 !name.is_empty()
+                    && !n.invisible
                     && !KNOWN_KINDS.iter().any(|k| name.to_lowercase().contains(k))
                     && !self.memory.npcs_met.contains_key(&key)
                     && !self.npcs_passed.contains(&key)

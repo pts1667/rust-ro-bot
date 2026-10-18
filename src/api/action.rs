@@ -14,6 +14,14 @@ pub struct SellLine {
     pub amount: u32,
 }
 
+/// An item of the cart put up for sale in a vending store.
+#[derive(Debug, Clone, Serialize)]
+pub struct VendLine {
+    pub cart_index: u32,
+    pub amount: u32,
+    pub price: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
@@ -135,6 +143,32 @@ pub enum Action {
         npc: u64,
     },
     RoomLeave,
+    /// Opens a chat room whose title shows above the bot.
+    RoomCreate {
+        title: String,
+        limit: u32,
+        public: bool,
+    },
+    /// An emote over the bot, by its client command name (`hmm`, `heh`, `ok`...).
+    Emote {
+        emotion: String,
+    },
+    /// Inventory to cart.
+    CartPut {
+        index: u32,
+        amount: u32,
+    },
+    VendingOpen {
+        title: String,
+        items: Vec<VendLine>,
+    },
+    VendingClose,
+    /// Inventory to the storage a Kafra opened.
+    StorageDeposit {
+        index: u32,
+        amount: u32,
+    },
+    StorageClose,
 }
 
 impl Action {
@@ -186,6 +220,13 @@ impl Action {
             Action::TradeCancel => "trade_cancel",
             Action::RoomJoinNpc { .. } => "room_join",
             Action::RoomLeave => "room_leave",
+            Action::RoomCreate { .. } => "room_create",
+            Action::Emote { .. } => "emote",
+            Action::CartPut { .. } => "cart_put",
+            Action::VendingOpen { .. } => "vending_open",
+            Action::VendingClose => "vending_close",
+            Action::StorageDeposit { .. } => "storage_deposit",
+            Action::StorageClose => "storage_close",
         }
     }
 }

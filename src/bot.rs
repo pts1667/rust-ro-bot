@@ -157,7 +157,15 @@ impl Bot {
     }
 
     pub async fn observe(&self) -> Result<Observation> {
-        let obs = self.api.observation(&self.name).await?;
+        let mut obs = self.api.observation(&self.name).await?;
+        obs.me.past_job = if obs.me.reborn {
+            self.memory.past_job.clone()
+        } else {
+            crate::knowledge::classes::SECOND_JOBS
+                .iter()
+                .find(|j| j.eq_ignore_ascii_case(&obs.me.job))
+                .map(|j| (*j).to_owned())
+        };
         let last = self
             .talk_seq
             .fetch_max(obs.last_message_seq(), Ordering::SeqCst);

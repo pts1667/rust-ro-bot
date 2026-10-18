@@ -34,6 +34,29 @@ impl ApiError {
     }
 }
 
+/// Walkable cells of a square of the map (`GET /bots/{name}/map`): `rows` from `y_max` down, each from `x_min` on,
+/// `.` for a walkable cell.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct MapGrid {
+    pub x_min: u16,
+    pub y_min: u16,
+    pub y_max: u16,
+    pub rows: Vec<String>,
+}
+
+impl MapGrid {
+    pub fn walkable(&self, x: u16, y: u16) -> bool {
+        if x < self.x_min || y < self.y_min || y > self.y_max {
+            return false;
+        }
+        self.rows
+            .get((self.y_max - y) as usize)
+            .and_then(|row| row.as_bytes().get((x - self.x_min) as usize))
+            == Some(&b'.')
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotSummary {
     pub name: String,
@@ -97,7 +120,18 @@ impl BotApi {
             .http
             .get(self.url(&format!("/bots/{name}/observation")));
         let value = self.send(req).await?;
-        serde_json::from_value(value).context("parsing observation")
+        let mut obs: Observation = serde_json::from_value(value).context("parsing observation")?;
+        obs.read_classes();
+        Ok(obs)
+    }
+
+    /// The walkable cells of the bot's map within `radius` of `x`, `y`.
+    pub async fn map_grid(&self, name: &str, x: u16, y: u16, radius: u16) -> Result<MapGrid> {
+        let req = self
+            .http
+            .get(self.url(&format!("/bots/{name}/map?x={x}&y={y}&radius={radius}")));
+        let value = self.send(req).await?;
+        serde_json::from_value(value).context("parsing map grid")
     }
 
     pub async fn settings(&self) -> Result<Value> {

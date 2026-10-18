@@ -1,8 +1,8 @@
 # rust-ro-bot
 
 Bots that play [rust-ro](https://github.com/pts1667/rust-ro) characters on their own. A bot leaves the training grounds,
-hunts, levels up, spends its stat and skill points, sells its loot, buys potions, changes jobs, joins parties and talks to
-NPCs and other players. It plays through the server's Bot API, so it is a character like any other in the world.
+hunts, levels up, spends its stat and skill points, sells its loot, buys potions, changes jobs (first, second, and after
+a rebirth at level 99 the transcendent ones), joins parties and talks to NPCs and other players. It plays through the server's Bot API, so it is a character like any other in the world.
 
 A planner (GOAP) does the playing. Goals come from built-in rules, or from a small local language model when one is
 running. **The model is optional:** without one, bots play with the rules alone.
@@ -68,6 +68,11 @@ cargo run --release -- --bots 10 --minutes 30 --log-dir logs
   place. The pool is the first `--pool`
   names of `names.txt` (default twice `--bots`, so 100). `--session 0` keeps every bot in the game. With turns,
   `--minutes` ends the whole run instead of each session.
+- Each hour a bot takes a break of 5 to 10 minutes (`--town-break 5-10`, `0` for none) in the nearest town, as players
+  do: it sits down near the others, says hello, keeps its party ad up and sometimes opens a chat room. A Merchant with
+  the Vending skill now and then rents a cart and opens a store of the loot no NPC shop sells. Joining a party ends the
+  break, since finding one is what it is for. A party takes its break together: the leader calls it in party chat
+  (`break in prontera for 8 min`), the members meet it in that town, and it ends when the leader says `break's over`.
 - `--log-dir <dir>` writes each bot's log to `<dir>/<name>.log`. Without it, every line in the terminal names its bot.
 - Ctrl+C stops them all after their current step, each with its report. So do SIGTERM, and on Windows Ctrl+Break or
   the console closing. A program that starts the bots and cannot send those passes `--stop-on-stdin` and writes a line
@@ -106,7 +111,7 @@ cargo run --release -- --bots 10 --minutes 30 --log-dir logs
 | `travel <map>...` | Walks the character to each map in turn, the way a goal's trip goes, and prints how each trip ended. |
 | `db <path>` | Prints a `/db` entry of the reference, such as `db maps/prt_fild08`. |
 | `db grounds <map>` | Lists the hunting grounds the bot would consider from a map. |
-| `db route <from>:<to>` | Prints the route between two maps. |
+| `db route <from>:<to>[#region]` | Prints the route between two maps, or into one part (region) of `<to>`. `travel <map>[#region]` walks a bot there. |
 | `llm-check` | Runs one goal choice with the language model and prints the prompt and the answer. |
 
 Options of `run`:
@@ -119,6 +124,7 @@ Options of `run`:
 | `--log-dir <dir>` | Each bot's log in `<dir>/<name>.log`. |
 | `--session MIN-MAX` | Minutes a bot plays before another character of the pool takes its place (default `30-60`, `0` for never). |
 | `--pool N` | Characters taking turns in the `--bots` places (default twice `--bots`). |
+| `--town-break MIN-MAX` | Minutes of each hour spent in a town among the others (default `5-10`, `0` for none). |
 | `--minutes N` | Stop after N minutes. |
 | `--stop-on-stdin` | Stop as on Ctrl+C when a line `stop` comes on stdin or stdin closes. |
 | `--until-level N` | Stop at base level N. |
@@ -178,6 +184,7 @@ All of these go in the server's `config.json`. Restart the server after changing
 | `bots.command_group` | Permission group for the bots' `@` commands. Bots use `@go` to get out of places with no warp out, so the group needs it. Group 1, the default, has it. |
 | `game.base_exp_rate`, `game.job_exp_rate` | Experience rates, for faster test runs. |
 | `game.sim_speed` | Runs the game clock faster than real time, for test runs. |
+| `scripting.test_npcs` | Places the test NPCs: the Job Master, warpers, the Prontera item mall. Off by default: bots then take the guilds' job quests (Swordman in Izlude, Mage in Geffen, Archer in Payon, Acolyte in Prontera, Merchant in Alberta, Thief in Morocc). Delete `cache/db/` after changing it. |
 
 ## Troubleshooting
 
@@ -190,6 +197,13 @@ All of these go in the server's `config.json`. Restart the server after changing
 - **In Git Bash, `db /db/maps/...` fails:** Git Bash rewrites a leading `/db/...` into a Windows path. Write
   `db maps/...` instead.
 - **rustc crashes with `STATUS_STACK_BUFFER_OVERRUN` on Windows:** set `RUST_MIN_STACK=67108864` and build again.
+- **Level 99 bots are never reborn:** the rebirth leaves every item and all zeny behind on the way to the Heart of
+  Ymir, so a bot takes it up only when a route leads into the Heart's room of `yuno_in05`. That room is behind the
+  random warps of rAthena's `npc/warps/cities/yuno.txt` (`#yun63` to `#yun75`, in the server's `towns_warps` module
+  with the other script warps of `npc/warps`):
+  check that `db maps/yuno_in05` lists them as transports, and delete `cache/db/` if it does not. A bot with a
+  Pushcart is not reborn either (the Valkyrie refuses one, and nothing takes it off), so Merchants rent none from base
+  level 90 on.
 
 ## More
 

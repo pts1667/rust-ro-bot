@@ -39,6 +39,9 @@ fn skill_quest(
         job_level,
         base_level: 1,
         sex: None,
+        reborn: None,
+        past: &[],
+        no_cart: false,
         skills,
         stages,
     }

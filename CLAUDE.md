@@ -59,6 +59,7 @@ deployed copy of rust-ro. Check the working directory of the running `server.exe
 ```
 cargo run --release                                            # 50 bots from names.txt, decision model voice, llm-share 0.25
                                                                # each logs off in a town after 30-60 min (--session), a resting one of 100 (--pool) takes its place
+                                                               # and spends 5-10 min an hour on a break in a town (--town-break)
 cargo run --release -- --bots 10 --minutes 25 --log-dir logs  # one log per bot in logs/<name>.log
 cargo run --release -- --server-dir ../rust-ro --stop-on-stdin  # key and addresses from the server's config.json; "stop" on stdin ends the run
 cargo run -- --key-file ../rust-ro/config/bots_api_key.txt --name Goapy probe

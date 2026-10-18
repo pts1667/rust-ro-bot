@@ -13,8 +13,8 @@ pub struct Talk {
     pub keywords: Vec<String>,
     /// The zeny it takes.
     pub fare: u64,
-    /// A route may go through it (a town's Kafra). A guard's way is only a way out for a bot already there: routes do
-    /// not cross moc_fild20, a level 80 field.
+    /// A route may go through it (a town's Kafra, a guard's way to Morocc). A guard's way back out to Prontera Field is
+    /// only a way out for a bot already there: routes do not cross moc_fild20, a level 80 field.
     pub through: bool,
 }
 
@@ -44,21 +44,26 @@ struct NpcWay {
     names: &'static [&'static str],
     to: &'static str,
     keywords: &'static [&'static str],
+    /// Routes may go through it: the bot lands next to a guard and asks the nearest one, so it never crosses the map.
+    through: bool,
 }
 
 /// The NPC ways the bot knows to ask for. moc_fild20 has no warp out, only a Continental Guard at every landing, who
 /// tells commoners to go and offers to send them to Morocc's camp; the pair at the north landing also send them back to
-/// Sograt Desert 1, by Prontera Field (a custom way of this server, after iRO).
+/// Sograt Desert 1, by Prontera Field (a custom way of this server, after iRO). Morocc is walled in by moc_fild20, so
+/// without the warpers of `scripting.test_npcs` the guards are the way into town.
 const NPC_WAYS: &[NpcWay] = &[
     NpcWay {
         names: &["Continental Guard"],
         to: "morocc",
         keywords: &["ask what happened", "ask about guard", "please do"],
+        through: true,
     },
     NpcWay {
         names: &["Continental Guard#07", "Continental Guard#08"],
         to: "moc_fild01",
         keywords: &["prontera field"],
+        through: false,
     },
 ];
 
@@ -72,7 +77,7 @@ pub fn npc_way(npc: &str, to: &str) -> Option<Talk> {
         names: way.names.iter().map(|n| (*n).to_owned()).collect(),
         keywords: way.keywords.iter().map(|k| (*k).to_owned()).collect(),
         fare: 0,
-        through: false,
+        through: way.through,
     })
 }
 
@@ -198,6 +203,34 @@ pub fn kafra_teleports(
                 through: true,
             };
             out.push((npc.x, npc.y, npc.region, *map, *x, *y, talk));
+        }
+    }
+    out
+}
+
+/// NPCs that send a character on from a map whose reference lists no way out, with the menu entries that ask and
+/// where they land: `(map, npc, keywords, to, x, y)`. The Teleporter of Valhalla, whom the Book of Ymir and the
+/// Heart of Ymir lead to, speaks only to the reborn (`Upper`), and sends them to a town of their choice
+/// (`jobs_misc::teleporter`); Juno is where the Book stands.
+const TELEPORTERS: &[(&str, &str, &[&str], &str, u16, u16)] =
+    &[("valkyrie", "Teleporter", &["juno"], "yuno", 328, 101)];
+
+/// The ways of `TELEPORTERS` out of `data`'s map: `(x, y, region, to, to_x, to_y, talk)`.
+pub fn teleporters(data: &MapData) -> Vec<(u16, u16, Option<u32>, &'static str, u16, u16, Talk)> {
+    let mut out = Vec::new();
+    for (map, name, keywords, to, to_x, to_y) in TELEPORTERS {
+        if *map != data.name {
+            continue;
+        }
+        for npc in data.npcs.iter().filter(|n| npc_named(&n.npc.name, name)) {
+            let talk = Talk {
+                npc: npc.npc.name.clone(),
+                names: vec![(*name).to_owned()],
+                keywords: keywords.iter().map(|k| (*k).to_owned()).collect(),
+                fare: 0,
+                through: false,
+            };
+            out.push((npc.x, npc.y, npc.region, *to, *to_x, *to_y, talk));
         }
     }
     out

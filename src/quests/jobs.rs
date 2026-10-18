@@ -32,6 +32,9 @@ fn job_quest(job: &'static str, from: &'static [&'static str], stages: Vec<super
         job_level: 40,
         base_level: 1,
         sex: None,
+        reborn: Some(false),
+        past: &[],
+        no_cart: false,
         skills: &[],
         stages,
     }

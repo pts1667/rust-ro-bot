@@ -5,7 +5,7 @@ pub mod client;
 pub mod forum;
 pub mod observation;
 
-pub use action::{Action, BuyLine, SellLine};
+pub use action::{Action, BuyLine, SellLine, VendLine};
 pub use client::{ApiError, BotApi};
 pub use observation::{BookingAd, Observation, Party, PartyInvitation, PartyMember, Trade, dist};
 #[cfg(test)]

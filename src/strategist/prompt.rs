@@ -36,7 +36,7 @@ Guidelines:
 Game primer (Ragnarok Online, pre-renewal rules):
 - Killing monsters gives base experience (base level, up to 99) and job experience (job level). Dying costs 1% of the base experience needed for the next level and sends you back to town.
 - Stats: STR melee damage and carry weight; AGI attack speed and dodging; VIT max HP, HP regeneration and healing item power; INT max SP and magic; DEX hit chance, bow damage and cast time; LUK critical hits. Each level gives status points; high stats cost more points.
-- Jobs: everyone starts as a Novice. At job level 10 a Novice becomes one of six first jobs: Swordman (melee, tough), Mage (magic, fragile), Archer (bows, DEX), Acolyte (healing and support), Merchant (trade, carries more), Thief (AGI, dodging). At job level 40 or more a first job becomes a second job: Swordman -> Knight or Crusader, Mage -> Wizard or Sage, Archer -> Hunter or Bard/Dancer, Acolyte -> Priest or Monk, Merchant -> Blacksmith or Alchemist, Thief -> Assassin or Rogue. Job level starts again at 1 after a change.
+- Jobs: everyone starts as a Novice. At job level 10 a Novice becomes one of six first jobs: Swordman (melee, tough), Mage (magic, fragile), Archer (bows, DEX), Acolyte (healing and support), Merchant (trade, carries more), Thief (AGI, dodging). At job level 40 or more a first job becomes a second job: Swordman -> Knight or Crusader, Mage -> Wizard or Sage, Archer -> Hunter or Bard/Dancer, Acolyte -> Priest or Monk, Merchant -> Blacksmith or Alchemist, Thief -> Assassin or Rogue. Job level starts again at 1 after a change. A second job at base level 99 and job level 50 may be reborn in Juno (the Rebirth quest: a donation of 1,285,000 zeny, and every item and all zeny left behind) as a High Novice, which goes the same way again, stronger: its high first job at job level 10, then at job level 40 the transcendent job of its old second job (Knight -> Lord Knight, Priest -> High Priest, Wizard -> High Wizard...). A reborn character shows as the job it continues.
 - Monsters: passive ones fight only when attacked, aggressive ones attack on sight, bosses are deadly. Monsters far above your level hit hard and are hard to hit.
 - Items: loot (Etc items like Jellopy) is only for selling to NPC shops. Potions and food heal HP. Above 50% weight HP stops regenerating; above 90% you cannot attack.
 - Maps: towns (prontera, izlude, geffen, payon, morocc, alberta) are safe and have shops. Fields like prt_fild08 have monsters, and the threat % tells how dangerous they are for you. Dungeons are harder.";
@@ -46,11 +46,16 @@ pub fn observation(snap: &Snapshot) -> String {
     let me = &snap.obs.me;
     let s = &me.stats;
     let mut o = String::new();
+    let job = if me.reborn {
+        format!("reborn {} ({})", me.job, me.class)
+    } else {
+        me.job.clone()
+    };
     let _ = writeln!(
         o,
         "Character: {} the {} (base level {}, job level {}), HP {}/{} ({:.0}%), SP {}/{}, zeny {}, weight {:.0}%.",
         me.name,
-        me.job,
+        job,
         me.base_level,
         me.job_level,
         me.hp,

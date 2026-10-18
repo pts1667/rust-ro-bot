@@ -347,7 +347,21 @@ async fn decide(
     let llm = settings.llm.as_ref();
     let decider = settings.decider.as_ref();
     state.on_job(&snap.obs.me.job);
-    if state.job_target.is_none() && state.pinned_jobs.is_empty() {
+    // Reborn, a character follows the line of the second job it was: its high first job, then its transcendent job
+    let me = &snap.obs.me;
+    if me.reborn
+        && state.pinned_jobs.is_empty()
+        && let Some(past) = me.past_job.as_deref()
+        && !crate::party::same_job(&me.job, past)
+        && state
+            .job_target
+            .as_deref()
+            .is_none_or(|t| !crate::party::same_job(t, past))
+    {
+        state.head_for_reborn(past);
+        tracing::info!(target: "strategist", past, "reborn: heading for the transcendent job");
+    }
+    if state.job_target.is_none() && state.pinned_jobs.is_empty() && !me.reborn {
         if snap.obs.me.job.eq_ignore_ascii_case("novice") {
             pick_first_job(state, snap);
         } else if skill_state::is_first_job(&snap.obs.me.job)

@@ -128,6 +128,7 @@ pub enum Command {
     /// Play (the command when none is given): GOAP executes, the strategist picks goals.
     Run(RunArgs),
     /// Walk the bot to each map in turn the way a goal's trip goes (warps, NPC ways, `@go`), and print how it ended.
+    /// `map#3` goes on into region 3 of the map.
     Travel {
         #[arg(required = true)]
         to: Vec<String>,
@@ -189,6 +190,10 @@ pub struct RunArgs {
     /// random length in between, or one number. 0 keeps every bot in the game.
     #[arg(long, default_value = "30-60", value_parser = Session::parse)]
     pub session: Session,
+    /// Minutes of each hour a bot spends in a town among the others, `MIN-MAX` or one number: it sits where players
+    /// are, is open to parties and sometimes opens a store. Joining a party ends the break. 0 for none.
+    #[arg(long, default_value = "5-10", value_parser = Session::parse)]
+    pub town_break: Session,
     /// Characters taking turns in the `--bots` places, the first names of `--names`. Defaults to twice `--bots`.
     #[arg(long)]
     pub pool: Option<usize>,
@@ -269,7 +274,7 @@ impl Session {
         };
         if min > max || (min == 0 && max > 0) {
             return Err(format!(
-                "{text:?}: a session lasts at least a minute, and MIN comes first"
+                "{text:?}: it lasts at least a minute, and MIN comes first"
             ));
         }
         Ok(Self { min, max })
@@ -372,8 +377,9 @@ impl ServerSetup {
         let path = dir.join("config.json");
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading the server config {}", path.display()))?;
-        let config: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .with_context(|| format!("parsing the server config {}", path.display()))?;
+        let config: serde_json::Value =
+            serde_json::from_str(text.trim_start_matches('\u{feff}'))
+                .with_context(|| format!("parsing the server config {}", path.display()))?;
         Ok(Self::from_config(dir, &config))
     }
 
@@ -492,7 +498,8 @@ mod tests {
         assert_eq!(server.url, "http://127.0.0.1:7002");
         assert_eq!(server.db_url, "http://192.168.1.5:6904");
         assert_eq!(server.key_file, dir.join("keys/bot.txt"));
-        let server = ServerSetup::from_config(dir, &serde_json::json!({ "bots": { "host": "::" } }));
+        let server =
+            ServerSetup::from_config(dir, &serde_json::json!({ "bots": { "host": "::" } }));
         assert_eq!(server.url, "http://[::1]:6902");
         assert_eq!(server.key_file, dir.join("config/bots_api_key.txt"));
         assert_eq!(reachable("fe80::1"), "[fe80::1]");
@@ -510,7 +517,10 @@ mod tests {
         assert_eq!(plain.db_url, DEFAULT_DB_URL);
         assert!(plain.key_file.is_none());
         let given = endpoints(&["--url", "http://h:1", "--db-url", "http://h:2"]).unwrap();
-        assert_eq!((given.url.as_str(), given.db_url.as_str()), ("http://h:1", "http://h:2"));
+        assert_eq!(
+            (given.url.as_str(), given.db_url.as_str()),
+            ("http://h:1", "http://h:2")
+        );
         // A server folder without a config is an error, not the defaults
         assert!(endpoints(&["--server-dir", "no/such/dir", "--url", "http://h:1"]).is_err());
     }

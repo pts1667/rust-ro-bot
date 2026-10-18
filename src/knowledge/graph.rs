@@ -25,6 +25,9 @@ pub struct Edge {
     pub to_region: Option<u32>,
     /// Not a warp but an NPC of `from` at `x`, `y` that sends the bot on when asked: a guard, a Kafra.
     pub talk: Option<Talk>,
+    /// One landing of a random warp: stepping on it may lead to any of the warp's landings. A route takes it as if
+    /// it led where the route needs; travel plans again from where it lands.
+    pub random: bool,
 }
 
 /// A transport NPC this near where a warp lands stands guard there: the way back is the NPC, not a warp next to the
@@ -174,6 +177,7 @@ impl WorldGraph {
                 from_region: w.region,
                 to_region: w.to.region,
                 talk: None,
+                random: false,
             })
             .collect();
         // A warp that lands on a warp of the map it leads to goes on at once: prt_castle's way to prt_gld lands in
@@ -225,7 +229,26 @@ impl WorldGraph {
                 from_region: a.land.region,
                 to_region: a.from.region,
                 talk: None,
+                random: false,
             });
+        }
+        // The random warps of the map: each landing is one way the warp may lead
+        for t in data.transports.iter().filter(|t| t.random_warp(map)) {
+            for (to, to_x, to_y, to_region) in t.destinations() {
+                edges.push(Edge {
+                    from: map.to_owned(),
+                    x: t.x,
+                    y: t.y,
+                    to,
+                    to_x,
+                    to_y,
+                    guessed: false,
+                    from_region: t.region,
+                    to_region,
+                    talk: None,
+                    random: true,
+                });
+            }
         }
         // The NPCs the bot knows to ask for a way
         for t in &data.transports {
@@ -244,10 +267,14 @@ impl WorldGraph {
                     from_region: t.region,
                     to_region,
                     talk: Some(talk),
+                    random: false,
                 });
             }
         }
-        for (x, y, region, to, to_x, to_y, talk) in talks::kafra_teleports(&data) {
+        for (x, y, region, to, to_x, to_y, talk) in talks::kafra_teleports(&data)
+            .into_iter()
+            .chain(talks::teleporters(&data))
+        {
             edges.push(Edge {
                 from: map.to_owned(),
                 x,
@@ -259,6 +286,7 @@ impl WorldGraph {
                 from_region: region,
                 to_region: None,
                 talk: Some(talk),
+                random: false,
             });
         }
         Ok(edges)
@@ -394,7 +422,7 @@ impl WorldGraph {
         Ok(None)
     }
 
-    /// Maps reachable from `from` within `max_hops` warps, with their distance in warps.
+    /// Maps reachable from `from` within `max_hops` warps (and free NPC ways), with their distance in warps.
     pub async fn neighbourhood(&self, from: &str, max_hops: u32) -> Result<Vec<(String, u32)>> {
         let start: Node = (from.to_owned(), None);
         let mut dist: HashMap<Node, u32> = HashMap::from([(start.clone(), 0)]);
@@ -409,7 +437,7 @@ impl WorldGraph {
             };
             for edge in edges.into_iter().filter(|e| {
                 e.usable_from(node.1)
-                    && e.talk.is_none()
+                    && e.talk.as_ref().is_none_or(|t| t.through && t.fare == 0)
                     && (e.to != e.from || e.to_region.is_some())
             }) {
                 let next: Node = (edge.to, edge.to_region);
@@ -497,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn a_map_guarded_at_its_landings_is_left_by_asking_and_never_crossed() {
         // As moc_fild20: warps land there from the town and the desert, and a guard at the landing sends players to
-        // the town when asked. The guessed ways back made it the short way from the desert to the town.
+        // the town when asked. The guessed ways back made it a crossing; the guard's way to the town is one.
         let tag = "guarded";
         let g = cache(
             &[
@@ -543,8 +571,10 @@ mod tests {
         );
         let none = HashSet::new();
         let maps = |r: Vec<Edge>| r.iter().map(|e| e.to.clone()).collect::<Vec<_>>();
-        let crossing = g.route("desert", "morocc", &none).await.unwrap().unwrap();
-        assert_eq!(maps(crossing), vec!["oasis", "field", "morocc"]);
+        let asking = g.route("desert", "morocc", &none).await.unwrap().unwrap();
+        assert_eq!(maps(asking), vec!["gorge", "morocc"]);
+        let walking = g.route("desert", "field", &none).await.unwrap().unwrap();
+        assert_eq!(maps(walking), vec!["oasis", "field"]);
         let out_of_it = g.route("gorge", "field", &none).await.unwrap().unwrap();
         assert_eq!(maps(out_of_it), vec!["morocc", "field"]);
         assert!(
@@ -552,7 +582,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .all(|(m, d)| m != "morocc" || *d == 3)
+                .all(|(m, d)| m != "morocc" || *d == 2)
         );
     }
 

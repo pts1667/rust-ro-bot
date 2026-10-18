@@ -31,6 +31,9 @@ pub struct Intent {
     /// Talking to an unknown NPC to see what it does: menus get the entries that ask for more (`curious_option`), a
     /// number prompt (an amount to pay or buy) ends the talk.
     pub curious: bool,
+    /// Answers to give in this order, one per menu or prompt, before anything else (a machine worked step by step):
+    /// the menu entry containing the step, or the step typed in. A menu without the step's entry ends the talk.
+    pub steps: Vec<String>,
 }
 
 /// The entry that says the next line of what was heard (`heard[from..]`), and where the heard lines go on after it.
@@ -383,6 +386,8 @@ impl Bot {
         let mut recited = 0;
         // Menus a curious talk answered.
         let mut curious_menus = 0;
+        // The steps given so far.
+        let mut step = 0;
         self.last_dialog.clear();
         self.first_menu.clear();
         for _ in 0..MAX_DIALOG_STEPS {
@@ -421,126 +426,166 @@ impl Bot {
                 .map(|a| a.replace("{name}", &self.name))
                 .collect();
             let known = candidates.first().cloned();
-            let action = match kind.as_str() {
-                "next" => Action::DialogNext,
-                "text" => {
-                    since_menu = transcript.len();
-                    let sung = if intent.recite {
-                        highlighted_line(&d.lines)
-                    } else {
-                        None
-                    };
-                    let text = known
-                        .or(sung)
-                        .or_else(|| intent.text_answer.clone())
-                        .unwrap_or_else(|| self.name.clone());
-                    tracing::info!(%text, "dialog text");
-                    Action::DialogText { text }
-                }
-                "number" if intent.curious => {
-                    self.act(Action::DialogClose).await?;
-                    return Ok(DialogEnd::GaveUp("asked for an amount".into()));
-                }
-                "number" => {
-                    let value = known
-                        .and_then(|a| a.trim().parse::<i64>().ok())
-                        .or_else(|| sum_asked(&transcript[since_menu..]))
-                        .unwrap_or(1);
-                    since_menu = transcript.len();
-                    tracing::info!(value, "dialog number");
-                    Action::DialogNumber { value }
-                }
-                "running" => {
+            let scripted = intent.steps.get(step).cloned();
+            let action = match (kind.as_str(), scripted) {
+                ("next", _) => Action::DialogNext,
+                ("running", _) => {
                     Bot::pause(300).await;
                     continue;
                 }
-                "shop" | "buy" | "sell" => return Ok(DialogEnd::Shop),
-                "menu" => {
+                ("menu", Some(next)) => {
                     let options = d
                         .prompt
                         .as_ref()
                         .map(|p| p.options.clone())
                         .unwrap_or_default();
-                    if self.first_menu.is_empty() {
-                        self.first_menu = options.clone();
-                    }
-                    let key = format!("{:?}{:?}", d.lines, options);
-                    let repeats = seen_menus.iter().filter(|k| **k == key).count();
-                    seen_menus.push(key);
-                    if repeats >= 2 || options.is_empty() {
+                    let Some(option) = option_for(&options, &next) else {
                         self.act(Action::DialogClose).await?;
-                        return Ok(DialogEnd::GaveUp(format!("menu repeats: {options:?}")));
-                    }
-                    if intent.curious {
-                        let Some(option) =
-                            curious_option(&transcript[since_menu..], &options, curious_menus)
-                        else {
-                            self.act(Action::DialogClose).await?;
-                            return Ok(DialogEnd::GaveUp(format!("no way out of {options:?}")));
-                        };
-                        curious_menus += 1;
+                        return Ok(DialogEnd::GaveUp(format!(
+                            "step {} '{next}' is not in {options:?}",
+                            step + 1
+                        )));
+                    };
+                    step += 1;
+                    since_menu = transcript.len();
+                    tracing::info!(option, choice = %options[option as usize - 1], "dialog step");
+                    Action::DialogChoose { option }
+                }
+                ("number", Some(next)) if next.trim().parse::<i64>().is_ok() => {
+                    step += 1;
+                    since_menu = transcript.len();
+                    let value = next.trim().parse::<i64>().unwrap_or_default();
+                    tracing::info!(value, "dialog step");
+                    Action::DialogNumber { value }
+                }
+                ("text", Some(next)) => {
+                    step += 1;
+                    since_menu = transcript.len();
+                    tracing::info!(text = %next, "dialog step");
+                    Action::DialogText { text: next }
+                }
+                (kind, _) => match kind {
+                    "text" => {
                         since_menu = transcript.len();
-                        tracing::info!(option, choice = %options[option as usize - 1], "curious dialog menu");
-                        match self.act(Action::DialogChoose { option }).await {
-                            Ok(result) => dialog = dialog_of(&result),
-                            Err(error) => {
-                                self.act(Action::DialogClose).await.ok();
-                                return Ok(DialogEnd::GaveUp(error.to_string()));
-                            }
-                        }
+                        let sung = if intent.recite {
+                            highlighted_line(&d.lines)
+                        } else {
+                            None
+                        };
+                        let text = known
+                            .or(sung)
+                            .or_else(|| intent.text_answer.clone())
+                            .unwrap_or_else(|| self.name.clone());
+                        tracing::info!(%text, "dialog text");
+                        Action::DialogText { text }
+                    }
+                    "number" if intent.curious => {
+                        self.act(Action::DialogClose).await?;
+                        return Ok(DialogEnd::GaveUp("asked for an amount".into()));
+                    }
+                    "number" => {
+                        let value = known
+                            .and_then(|a| a.trim().parse::<i64>().ok())
+                            .or_else(|| sum_asked(&transcript[since_menu..]))
+                            .unwrap_or(1);
+                        since_menu = transcript.len();
+                        tracing::info!(value, "dialog number");
+                        Action::DialogNumber { value }
+                    }
+                    "running" => {
+                        Bot::pause(300).await;
                         continue;
                     }
-                    if intent.strict {
-                        let Some(option) =
-                            match_option(&options, &intent.keywords).filter(|_| repeats == 0)
-                        else {
+                    "shop" | "buy" | "sell" => return Ok(DialogEnd::Shop),
+                    "menu" => {
+                        let options = d
+                            .prompt
+                            .as_ref()
+                            .map(|p| p.options.clone())
+                            .unwrap_or_default();
+                        if self.first_menu.is_empty() {
+                            self.first_menu = options.clone();
+                        }
+                        let key = format!("{:?}{:?}", d.lines, options);
+                        let repeats = seen_menus.iter().filter(|k| **k == key).count();
+                        seen_menus.push(key);
+                        if repeats >= 2 || options.is_empty() {
                             self.act(Action::DialogClose).await?;
-                            return Ok(DialogEnd::GaveUp(format!(
-                                "no entry to pick in {options:?}"
-                            )));
+                            return Ok(DialogEnd::GaveUp(format!("menu repeats: {options:?}")));
+                        }
+                        if intent.curious {
+                            let Some(option) =
+                                curious_option(&transcript[since_menu..], &options, curious_menus)
+                            else {
+                                self.act(Action::DialogClose).await?;
+                                return Ok(DialogEnd::GaveUp(format!("no way out of {options:?}")));
+                            };
+                            curious_menus += 1;
+                            since_menu = transcript.len();
+                            tracing::info!(option, choice = %options[option as usize - 1], "curious dialog menu");
+                            match self.act(Action::DialogChoose { option }).await {
+                                Ok(result) => dialog = dialog_of(&result),
+                                Err(error) => {
+                                    self.act(Action::DialogClose).await.ok();
+                                    return Ok(DialogEnd::GaveUp(error.to_string()));
+                                }
+                            }
+                            continue;
+                        }
+                        if intent.strict {
+                            let Some(option) =
+                                match_option(&options, &intent.keywords).filter(|_| repeats == 0)
+                            else {
+                                self.act(Action::DialogClose).await?;
+                                return Ok(DialogEnd::GaveUp(format!(
+                                    "no entry to pick in {options:?}"
+                                )));
+                            };
+                            since_menu = transcript.len();
+                            tracing::info!(option, choice = %options[option as usize - 1], "dialog menu");
+                            match self.act(Action::DialogChoose { option }).await {
+                                Ok(result) => dialog = dialog_of(&result),
+                                Err(error) => {
+                                    self.act(Action::DialogClose).await.ok();
+                                    return Ok(DialogEnd::GaveUp(error.to_string()));
+                                }
+                            }
+                            continue;
+                        }
+                        let heard = heard.get_or_insert_with(|| transcript.clone());
+                        let recital = if intent.recite {
+                            recite_next(heard, recited, &options)
+                        } else {
+                            None
+                        };
+                        let option = match (
+                            recital,
+                            candidates.iter().find_map(|a| option_for(&options, a)),
+                        ) {
+                            (Some((i, next)), _) => {
+                                recited = next;
+                                i
+                            }
+                            (None, Some(i)) => i,
+                            (None, None) => {
+                                match hidden_word(&transcript[since_menu..], &options) {
+                                    Some(i) => i,
+                                    None => {
+                                        self.choose_option(&transcript, &options, intent, repeats)
+                                            .await
+                                    }
+                                }
+                            }
                         };
                         since_menu = transcript.len();
                         tracing::info!(option, choice = %options[option as usize - 1], "dialog menu");
-                        match self.act(Action::DialogChoose { option }).await {
-                            Ok(result) => dialog = dialog_of(&result),
-                            Err(error) => {
-                                self.act(Action::DialogClose).await.ok();
-                                return Ok(DialogEnd::GaveUp(error.to_string()));
-                            }
-                        }
-                        continue;
+                        Action::DialogChoose { option }
                     }
-                    let heard = heard.get_or_insert_with(|| transcript.clone());
-                    let recital = if intent.recite {
-                        recite_next(heard, recited, &options)
-                    } else {
-                        None
-                    };
-                    let option = match (
-                        recital,
-                        candidates.iter().find_map(|a| option_for(&options, a)),
-                    ) {
-                        (Some((i, next)), _) => {
-                            recited = next;
-                            i
-                        }
-                        (None, Some(i)) => i,
-                        (None, None) => match hidden_word(&transcript[since_menu..], &options) {
-                            Some(i) => i,
-                            None => {
-                                self.choose_option(&transcript, &options, intent, repeats)
-                                    .await
-                            }
-                        },
-                    };
-                    since_menu = transcript.len();
-                    tracing::info!(option, choice = %options[option as usize - 1], "dialog menu");
-                    Action::DialogChoose { option }
-                }
-                _ => {
-                    self.act(Action::DialogClose).await?;
-                    return Ok(DialogEnd::Closed);
-                }
+                    _ => {
+                        self.act(Action::DialogClose).await?;
+                        return Ok(DialogEnd::Closed);
+                    }
+                },
             };
             match self.act(action).await {
                 Ok(result) => dialog = dialog_of(&result),

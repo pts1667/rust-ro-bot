@@ -17,6 +17,7 @@ use crate::knowledge::Knowledge;
 use crate::knowledge::combat::Fighter;
 use crate::knowledge::gear::Shopping;
 use crate::knowledge::gear::Slot;
+use crate::knowledge::graph::Trip;
 use crate::knowledge::grounds::{Hunt, is_explorable_map_name};
 use crate::party::recruit::MAX_MEMBERS;
 use crate::party::support::SPARE_ABOVE;
@@ -24,7 +25,7 @@ use crate::party::{SIGHT, same_job};
 use crate::quests::{self, Act, Need, Quest, QuestProgress, Reward, stage_map};
 use crate::social::Ask;
 
-/// The map of the Job Master.
+/// The map of the Job Master, a test NPC the server places only with `scripting.test_npcs`.
 pub const JOB_MAP: &str = "prontera";
 const HUNT_OPTIONS: usize = 5;
 const HUNT_HOPS: u32 = 4;
@@ -249,8 +250,11 @@ async fn game_options(
     if let Some(o) = quest_opts.iter().find(|o| o.score >= IN_TEST) {
         return Ok(vec![o.clone()]);
     }
-    // The Job Master makes first jobs; second jobs come from the guilds' quests.
-    if ws.job_change_ready && ws.job.eq_ignore_ascii_case("novice") {
+    // Where the server has a Job Master, it makes first jobs; elsewhere the guilds' quests do, as second jobs.
+    if ws.job_change_ready
+        && ws.job.eq_ignore_ascii_case("novice")
+        && has_job_master(knowledge).await
+    {
         for job in next_jobs(&ws.job) {
             let goal = Goal::JobChange {
                 job: (*job).to_owned(),
@@ -367,7 +371,13 @@ async fn game_options(
     if snap.obs.me.hp_frac() < 0.9 {
         out.push(opt("rest", Goal::Rest, "stand still until HP is back"));
     }
-    let budget = gear_budget(snap.obs.me.zeny, snap.potion_price);
+    let budget = gear_budget(
+        snap.obs
+            .me
+            .zeny
+            .saturating_sub(zeny_saved(snap, knowledge, state).await?),
+        snap.potion_price,
+    );
     if budget > 0
         && let Some(up) = knowledge
             .best_upgrade(
@@ -441,6 +451,74 @@ async fn game_options(
 
 /// The quests the bot may take up now, each with the goal of its next stage: the stage itself, or buying or
 /// hunting what it asks for.
+/// Whether the reference places a Job Master on its map.
+async fn has_job_master(knowledge: &Knowledge) -> bool {
+    knowledge.db.map(JOB_MAP).await.is_ok_and(|m| {
+        m.npcs
+            .iter()
+            .any(|n| n.npc.name.to_lowercase().contains("job master"))
+    })
+}
+
+/// Whether the bot heads for the reward of the quest: the job it aims at, the next job on its way, any rebirth. The
+/// quests of the reborn line follow the second job the character was (`Quest::past`), whatever the target says.
+fn wanted(q: &Quest, obs: &Observation, state: &StrategicState) -> bool {
+    let Reward::Job(job) = q.reward else {
+        return true;
+    };
+    if q.reborn == Some(true) {
+        return true;
+    }
+    match &state.job_target {
+        Some(target) => same_job(target, job),
+        None => next_jobs(&obs.me.job).iter().any(|j| same_job(j, job)),
+    }
+}
+
+/// Whether a route leads into the room of the Heart of Ymir. The rebirth leaves every item and all zeny behind on
+/// the way there: a bot that could not reach it would be left with nothing. This server has none of the random
+/// warps of `yuno_in05` that lead into it.
+async fn heart_reachable(
+    knowledge: &Knowledge,
+    obs: &Observation,
+    state: &StrategicState,
+) -> Result<bool> {
+    let (map, region) = quests::rebirth::HEART_ROOM;
+    if obs.map.name == map && obs.me.region == Some(region) {
+        return Ok(true);
+    }
+    let avoid: HashSet<String> = state.avoid_maps.iter().cloned().collect();
+    let trip = Trip::new(&obs.map.name, map, &avoid)
+        .starting_in(obs.me.region)
+        .ending_in(Some(region));
+    Ok(knowledge.graph.route_for(trip).await?.is_some())
+}
+
+/// Zeny the bot saves up for a quest it heads for and can carry out (the donation for the Book of Ymir), not to be
+/// spent on gear.
+async fn zeny_saved(snap: &Snapshot, knowledge: &Knowledge, state: &StrategicState) -> Result<u64> {
+    let obs = &snap.obs;
+    let mut saved = 0;
+    for q in quests::all() {
+        if !q.open_to(obs) || !awake(snap.quests.get(q.id)) || !wanted(q, obs, state) {
+            continue;
+        }
+        let p = snap.quests.get(q.id).cloned().unwrap_or_default();
+        let Some(stage) = q.stages.get(q.actionable_stage(&p, obs)) else {
+            continue;
+        };
+        let Act::Gather(Need::Zeny(z) | Need::ItemsAndZeny(_, z)) = &stage.act else {
+            continue;
+        };
+        if *z > saved
+            && (q.reward != Reward::Rebirth || heart_reachable(knowledge, obs, state).await?)
+        {
+            saved = *z;
+        }
+    }
+    Ok(saved)
+}
+
 async fn quest_options(
     snap: &Snapshot,
     knowledge: &Knowledge,
@@ -454,14 +532,11 @@ async fn quest_options(
         if !q.open_to(obs) || !awake(progress) {
             continue;
         }
-        if let Reward::Job(job) = q.reward {
-            let wanted = match &state.job_target {
-                Some(target) => same_job(target, job),
-                None => next_jobs(&obs.me.job).iter().any(|j| same_job(j, job)),
-            };
-            if !wanted {
-                continue;
-            }
+        if !wanted(q, obs, state) {
+            continue;
+        }
+        if q.reward == Reward::Rebirth && !heart_reachable(knowledge, obs, state).await? {
+            continue;
         }
         let p = progress.cloned().unwrap_or_default();
         let i = q.actionable_stage(&p, obs);
@@ -471,7 +546,7 @@ async fn quest_options(
         let head = format!("{} (step {} of {})", q.title, i + 1, q.stages.len());
         let score = if stage.inside && stage_map(stage) == Some(obs.map.name.as_str()) {
             IN_TEST
-        } else if matches!(q.reward, Reward::Job(_)) {
+        } else if matches!(q.reward, Reward::Job(_) | Reward::Rebirth) {
             JOB_QUEST
         } else if i > 0
             && !next_jobs(&obs.me.job)
@@ -747,9 +822,14 @@ pub fn fallback(snap: &Snapshot, options: &[Opt], state: &StrategicState) -> Opt
             return Some(o);
         }
     }
-    // The quest to the next job.
-    if let Some(o) = options.iter().find(|o| o.id.starts_with("quest:job:")) {
-        return Some(o.clone());
+    // The quest to the next job: the one of the build first.
+    if let Some(o) = find(&format!("quest:job:{job}")).or_else(|| {
+        options
+            .iter()
+            .find(|o| o.id.starts_with("quest:job:"))
+            .cloned()
+    }) {
+        return Some(o);
     }
     // Better equipment the bot can pay for, potions kept aside.
     if let Some(o) = options.iter().find(|o| o.id.starts_with("gear:")) {

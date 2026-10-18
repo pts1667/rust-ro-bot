@@ -57,6 +57,9 @@ pub struct Memory {
     pub quests: crate::quests::QuestBook,
     /// The NPCs the bot talked to out of curiosity, as `map:name`, and what came of it.
     pub npcs_met: BTreeMap<String, NpcNote>,
+    /// The second job the character is, or was before its rebirth: the line its reborn classes follow, which the
+    /// server keeps in a script variable nobody sees.
+    pub past_job: Option<String>,
     #[serde(skip)]
     path: PathBuf,
 }

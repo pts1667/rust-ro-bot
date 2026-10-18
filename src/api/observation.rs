@@ -35,6 +35,19 @@ pub struct Observation {
     /// The quest window: quests started and not completed.
     pub quests: Vec<QuestEntry>,
     pub chat_room: Option<ChatRoom>,
+    /// The cart, `None` without one.
+    pub cart: Option<Vec<CartItem>>,
+    /// The bot's vending store while it is open.
+    pub vending: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CartItem {
+    pub index: u32,
+    pub item_id: u32,
+    pub name: String,
+    pub amount: u32,
 }
 
 /// A skill waiting for a choice (Arrow Crafting, Teleport...): answer with `skill_choose`.
@@ -78,7 +91,17 @@ pub struct QuestObjective {
 pub struct Me {
     pub name: String,
     pub char_id: u64,
+    /// The job, a reborn class read as the job it continues (`LordKnight` as `Knight`), see `knowledge::classes`.
     pub job: String,
+    /// The class as the server names it.
+    #[serde(skip)]
+    pub class: String,
+    /// The class is a reborn one (a High Novice, a high first job, a transcendent job).
+    #[serde(skip)]
+    pub reborn: bool,
+    /// The second job the character was reborn from, or is: the bot remembers it, nothing shows it.
+    #[serde(skip)]
+    pub past_job: Option<String>,
     /// `male` or `female`.
     pub sex: String,
     pub base_level: u32,
@@ -287,6 +310,8 @@ pub struct Npc {
     /// Its waiting room, where players queue for a test.
     pub waiting_room: Option<NpcRoom>,
     pub region: Option<u32>,
+    /// The invisible sprite: nothing shows there, but a click talks to it (the Mixing Machine). Some answer nothing.
+    pub invisible: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -446,6 +471,28 @@ pub fn dist(a: (u16, u16), b: (u16, u16)) -> u32 {
 }
 
 impl Observation {
+    /// Reads the reborn classes of the bot, its party and the players around as the jobs they continue.
+    pub fn read_classes(&mut self) {
+        use crate::knowledge::classes::base_class;
+        self.me.class = self.me.job.clone();
+        if let Some(base) = base_class(&self.me.job) {
+            self.me.job = base.to_owned();
+            self.me.reborn = true;
+        }
+        if let Some(party) = &mut self.party {
+            for job in party.members.iter_mut().filter_map(|m| m.job.as_mut()) {
+                if let Some(base) = base_class(job) {
+                    *job = base.to_owned();
+                }
+            }
+        }
+        for p in &mut self.players {
+            if let Some(base) = base_class(&p.job) {
+                p.job = base.to_owned();
+            }
+        }
+    }
+
     pub fn pos(&self) -> (u16, u16) {
         self.me.pos()
     }

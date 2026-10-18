@@ -19,6 +19,12 @@ use crate::knowledge::talks::shown_name;
 
 /// Most warps one trip takes before giving up.
 const MAX_LEGS: usize = 30;
+/// Cells from a random warp past which the bot was sent on: a landing is at least 4 cells from the warp it came by.
+/// Most random warps one trip into a room takes before giving up.
+const MAX_RANDOM_LEGS: usize = 80;
+const RANDOM_WARP_REACH: u32 = 3;
+/// Cells between a warp inside a map as the reference places it and as the observation shows it.
+const INNER_WARP_OFF: u32 = 2;
 /// Tries to step on one warp, a walk being cut by the 30 s action timeout.
 const WARP_TRIES: usize = 5;
 /// Walks to one warp cut short by attacks, before giving up.
@@ -152,11 +158,16 @@ fn first_door(doors: &[(u32, (u16, u16), u32)], from: u32, to: u32) -> Option<(u
     None
 }
 
-/// The warp of the observation that matches a warp of the database: same destination, nearest position.
+/// The warp of the observation that matches a warp of the database: same destination, nearest position. Inside one
+/// map every warp leads to that map, so the warp must stand where the edge's does: on `yuno_in05`, the nearest one
+/// to the first random warp was `yun76`, out of reach in another part of the map. So must a random warp's, which
+/// shares its landings with other warps of the map (the random warps of `c_tower2` all lead into `c_tower3`).
 fn matching_warp<'a>(obs: &'a Observation, edge: &Edge) -> Option<&'a Warp> {
+    let in_place = edge.random || edge.to == edge.from;
     obs.warps
         .iter()
         .filter(|w| w.to_map == edge.to)
+        .filter(|w| !in_place || dist((w.x, w.y), (edge.x, edge.y)) <= INNER_WARP_OFF)
         .min_by_key(|w| dist((w.x, w.y), (edge.x, edge.y)))
 }
 
@@ -209,7 +220,9 @@ impl Bot {
     pub async fn travel_into(&mut self, map: &str, region: u32) -> Result<Outcome> {
         let mut skip: HashSet<String> = HashSet::new();
         let avoid: HashSet<String> = self.memory.strategy.avoid_maps.iter().cloned().collect();
-        for _ in 0..MAX_LEGS {
+        // A maze of random warps takes 12 of them on average from the entrance of yuno_in05, and many more at times
+        let (mut legs, mut random_legs) = (0, 0);
+        while legs < MAX_LEGS && random_legs < MAX_RANDOM_LEGS {
             if self.preempted() {
                 return Ok(Outcome::Preempted);
             }
@@ -233,6 +246,11 @@ impl Bot {
                 )));
             };
             tracing::info!(from = %obs.map.name, to = %edge.to, room = region, "into a room");
+            if edge.random {
+                random_legs += 1;
+            } else {
+                legs += 1;
+            }
             match self.take_warp(&obs, edge).await? {
                 Outcome::Done => {}
                 Outcome::Preempted => return Ok(Outcome::Preempted),
@@ -568,15 +586,21 @@ impl Bot {
         let (inner, start_region) = (edge.to == from, obs.me.region);
         let crossed =
             |obs: &Observation| obs.map.name != from || inner && obs.me.region != start_region;
+        // A random warp may land in the part of the map it stands in: taken once a walk onto it left the bot elsewhere
+        let jumped = |obs: &Observation| {
+            edge.random && dist(obs.pos(), (edge.x, edge.y)) > RANDOM_WARP_REACH
+        };
         let (mut tries, mut attacked_walks, mut fights) = (0, 0, 0);
+        let mut walked = false;
         while tries < WARP_TRIES && attacked_walks < ATTACKED_WALKS {
             let obs = self.observe().await?;
             if obs.me.dead {
                 return Ok(Outcome::failed("dead"));
             }
-            if crossed(&obs) {
+            if crossed(&obs) || walked && jumped(&obs) {
                 return Ok(Outcome::Done);
             }
+            walked = true;
             let action = match matching_warp(&obs, edge) {
                 Some(w) => Action::Use { target: w.id },
                 // A warp the observation does not show (an NPC warp of the database): walk onto its cell.
@@ -626,13 +650,13 @@ impl Bot {
             }
         }
         let obs = self.observe().await?;
-        if crossed(&obs) {
+        if crossed(&obs) || jumped(&obs) {
             return Ok(Outcome::Done);
         }
         // Every walk ended without a warp and nothing got in the way: there is no usable warp there (a guessed way
         // back, or an entrance behind a quest NPC). Routes leave it out from now on. When a guessed way out fails,
         // the map's other guesses are no better (moc_fild20 has guards instead of warps): they all go.
-        if tries >= WARP_TRIES && attacked_walks == 0 {
+        if tries >= WARP_TRIES && attacked_walks == 0 && !edge.random {
             let (key, note) = if edge.guessed {
                 (
                     Edge::guessed_key(&from),
@@ -975,7 +999,55 @@ impl Bot {
 
 #[cfg(test)]
 mod tests {
-    use super::{avoided_strays, first_door, leg_toward};
+    use super::{avoided_strays, first_door, leg_toward, matching_warp};
+
+    #[test]
+    fn a_warp_inside_a_map_matches_only_where_it_stands() {
+        use crate::api::Observation;
+        use crate::api::observation::Warp;
+        use crate::knowledge::graph::Edge;
+        let mut obs = Observation::default();
+        obs.map.name = "yuno_in05".into();
+        // yun76, the way into the Heart's room, is the only warp the observation shows
+        obs.warps.push(Warp {
+            id: 76,
+            x: 31,
+            y: 167,
+            to_map: "yuno_in05".into(),
+            ..Default::default()
+        });
+        let random = Edge {
+            from: "yuno_in05".into(),
+            x: 153,
+            y: 141,
+            to: "yuno_in05".into(),
+            random: true,
+            ..Default::default()
+        };
+        assert!(matching_warp(&obs, &random).is_none());
+        let yun76 = Edge {
+            x: 31,
+            y: 168,
+            ..random.clone()
+        };
+        assert_eq!(matching_warp(&obs, &yun76).map(|w| w.id), Some(76));
+        // A warp to another map still matches the nearest of the observation's
+        obs.warps[0].to_map = "yuno_in02".into();
+        let out = Edge {
+            x: 40,
+            y: 160,
+            to: "yuno_in02".into(),
+            random: false,
+            ..random.clone()
+        };
+        assert_eq!(matching_warp(&obs, &out).map(|w| w.id), Some(76));
+        // A random warp to another map does not: other warps lead there as well
+        let random_out = Edge {
+            random: true,
+            ..out
+        };
+        assert!(matching_warp(&obs, &random_out).is_none());
+    }
 
     #[test]
     fn a_warp_stepped_off_is_avoided_by_the_trips() {

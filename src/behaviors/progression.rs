@@ -34,7 +34,8 @@ pub fn next_stat(stats: [u32; 6], points: u32, build: &str) -> Option<&'static s
         .map(|i| STATS[i])
 }
 
-/// Skills learned in this order, per job, before anything else the server offers.
+/// Skills learned in this order, per job, before anything else the server offers. `NAME:LEVEL` stops at that level,
+/// the skill coming back later in the list for the rest.
 fn preferred_skills(job: &str) -> &'static [&'static str] {
     match job.to_lowercase().as_str() {
         "novice" => &["NV_BASIC"],
@@ -62,12 +63,17 @@ fn preferred_skills(job: &str) -> &'static [&'static str] {
             "AL_DP",
             "AL_DEMONBANE",
         ],
+        // A cart and a store early (Pushcart needs Enlarge Weight Limit 5, Vending Pushcart 3), Mammonite to fight
         "merchant" => &[
-            "MC_INCCARRY",
+            "MC_INCCARRY:5",
+            "MC_MAMMONITE",
+            "MC_PUSHCART:3",
+            "MC_VENDING:3",
             "MC_DISCOUNT",
             "MC_OVERCHARGE",
+            "MC_INCCARRY",
             "MC_PUSHCART",
-            "MC_MAMMONITE",
+            "MC_VENDING",
         ],
         "thief" => &["TF_DOUBLE", "TF_MISS", "TF_STEAL", "TF_HIDING", "TF_POISON"],
         _ => &[],
@@ -168,7 +174,11 @@ impl Bot {
             let job = obs.me.job.clone();
             let candidates: Vec<String> = preferred_skills(&job)
                 .iter()
-                .map(|s| (*s).to_owned())
+                .filter_map(|s| match s.split_once(':') {
+                    Some((name, level)) => (obs.skill_level(name) < level.parse().unwrap_or(0))
+                        .then(|| name.to_owned()),
+                    None => Some((*s).to_owned()),
+                })
                 .chain(offered.iter().cloned())
                 .collect();
             let Some(skill) = candidates.into_iter().find(|s| !failed.contains(s)) else {
@@ -196,7 +206,7 @@ impl Bot {
         }
         let obs = self.observe().await?;
         if learned.is_empty() {
-            self.skills_stuck_at = Some((obs.me.job.clone(), obs.me.job_level));
+            self.skills_stuck_at = Some((obs.me.class.clone(), obs.me.job_level));
             return Ok(Outcome::failed("no skill could be learned"));
         }
         learned.dedup();

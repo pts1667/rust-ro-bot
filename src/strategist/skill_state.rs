@@ -219,6 +219,22 @@ impl StrategicState {
         self.objective = truncate(&aim, OBJECTIVE_LEN);
     }
 
+    /// Heads, reborn, for the transcendent job of `past`, the second job the character was (`Knight`: Lord Knight),
+    /// through the high first job of its line.
+    pub fn head_for_reborn(&mut self, past: &str) {
+        self.job_target = Some(past.to_owned());
+        let name = crate::knowledge::classes::TRANSCENDENT
+            .iter()
+            .find(|t| same_job(t.second, past))
+            .map_or(past, |t| t.name);
+        self.objective = truncate(
+            &format!(
+                "Reborn: become a high first job at job level 10, then a {name} at job level 40."
+            ),
+            OBJECTIVE_LEN,
+        );
+    }
+
     /// Once the character has become its `job_target`, the target and the objective about it are done: clears the
     /// target and sets the next step as the objective. The model never rewrote them by itself.
     pub fn on_job(&mut self, job: &str) {

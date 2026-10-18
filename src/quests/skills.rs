@@ -30,6 +30,9 @@ pub(super) fn bring(
         job_level,
         base_level: 1,
         sex: None,
+        reborn: None,
+        past: &[],
+        no_cart: false,
         skills: &[],
         stages: vec![
             gather("bring what the teacher asks for", items),
@@ -56,6 +59,9 @@ fn first_aid() -> Quest {
         job_level: 4,
         base_level: 1,
         sex: None,
+        reborn: None,
+        past: &[],
+        no_cart: false,
         skills: &[],
         stages: vec![
             talk("ask Nami to teach First Aid", "prt_in", "Nami", 234, 133)
@@ -87,6 +93,9 @@ fn play_dead() -> Quest {
         job_level: 7,
         base_level: 1,
         sex: None,
+        reborn: None,
+        past: &[],
+        no_cart: false,
         skills: &[("NV_FIRSTAID", 1)],
         stages: vec![
             talk(
@@ -261,6 +270,9 @@ fn sand_attack() -> Quest {
         job_level: 25,
         base_level: 1,
         sex: None,
+        reborn: None,
+        past: &[],
+        no_cart: false,
         skills: &[],
         stages: vec![
             gather("bring 5 Fine Grit", &[(7041, 5)]),
