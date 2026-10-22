@@ -75,7 +75,24 @@ voice/                    --voice llm (free text, the LLM strategist) or system-
 there with the server's `scripting.test_npcs`; otherwise first jobs are `quest:job:<job>` of `quests/first_jobs.rs`, job
 level 10 and Basic Skill 9; only the `job_target` option when one is set), `hunt:<map>` (top 5 within 4 warps, from `knowledge::grounds`, with the
 exp/s ratio to the current map), `sell_loot`, `buy_potions` (healing as a multiple of max HP), `rest`, and
-`explore:<map>` (up to 2 unvisited maps within 2 warps, the insides of towns included).
+`explore:<map>` (up to 2 unvisited maps within 2 warps, the insides of towns included), and with the server's
+`alive_towns` plugin `town_quest:<n>` and `town_quest:reward`.
+
+- Town quests (`behaviors/town_quests.rs`), only when the observation lists the plugin's `offers` action under
+  `plugins.alive_towns`: in a town of the plugin (asked once per town and base level every 10 minutes; a town that
+  answers with an `error` is not asked again in the run), the bot lists the townsfolk's offers for the hour and keeps
+  those it can do: a hunt of a monster it beats, or loot it can farm, on a ground within 6 warps and reached without
+  crossing a deadly map (`Hunt::ground_on`, else `farm_ground` for loot), best experience per warp first, up to its free
+  slots. It walks to the giver (followed in sight, since the townsfolk walk their rounds) until a bubble shows: it
+  accepts when the bubble is over one of its picks, and declines one over anyone else (the nearest townsperson with an
+  offer speaks up first; after an answer nobody else does until the bot walks 17 cells off, which it does once). Not
+  during a job quest's stage or a favour, nor while sitting on a break; a party member only on the party's break.
+  The quests held (`plugins.alive_towns.data.quests`) become `town_quest:<n>` options, a hunt on each one's ground; the
+  fallback takes the best one while its ground scores at least half the best hunt's (the reward is 1.5x the kills' exp).
+  The hunt prefers their monsters (x3, the droppers of a loot quest too), and loot asked for is not sold. Once one is
+  done, `town_quest:reward` goes to the nearest town of the plugin (`Explore`), which pays on arrival; the fallback
+  takes it before gear. The rewards and givers are remembered at accept time (`Memory::town_quests`), since the plugin
+  does not show them afterwards; the journal notes each quest taken, done, paid or run out.
 
 - Curiosity (`behaviors/curiosity.rs`): on a map it went to explore, the bot talks to up to 3 NPCs it does not know;
   on the way anywhere, it stops for an unknown NPC within 12 cells with a 15% chance (one roll per NPC and run, 90 s

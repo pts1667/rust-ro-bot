@@ -322,6 +322,39 @@ impl Hunt<'_> {
         Ok(best.map(|(_, g, m)| (g, m)))
     }
 
+    /// `map` as a ground for fighting one of `wanted` (monster names): reached within `max_hops` warps without crossing a
+    /// deadly map, and with one of them among its safe targets. A town quest names the map.
+    pub async fn ground_on(&self, map: &str, wanted: &[String]) -> Result<Option<Ground>> {
+        if self.avoid_maps.contains(map) || !is_hunting_map_name(map) {
+            return Ok(None);
+        }
+        let db = &self.knowledge.db;
+        let Some(hops) = self.safe_hops(map, &mut HashMap::new()).await? else {
+            return Ok(None);
+        };
+        if hops > self.max_hops {
+            return Ok(None);
+        }
+        let Ok(data) = db.map(map).await else {
+            return Ok(None);
+        };
+        let mut mobs = Vec::new();
+        for spawn in &data.mob_spawns {
+            if let Some(id) = spawn.mob.id_u32()
+                && let Ok(mob) = db.mob(id).await
+            {
+                mobs.push(mob);
+            }
+        }
+        Ok(
+            score_map(&data, &mobs, self.fighter, hops, self.avoid_mobs).filter(|g| {
+                g.targets
+                    .iter()
+                    .any(|(n, _, _)| wanted.iter().any(|w| w.eq_ignore_ascii_case(n)))
+            }),
+        )
+    }
+
     /// The best grounds within `max_hops` warps of `from`, on a way that crosses no deadly map (`safe_hops`): the score
     /// of mjo_dun01 said threat 0%, and five bots died on mjolnir_02 on the way.
     pub async fn hunting_grounds(&self, limit: usize) -> Result<Vec<Ground>> {

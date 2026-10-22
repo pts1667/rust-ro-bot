@@ -60,6 +60,8 @@ pub struct Memory {
     /// The second job the character is, or was before its rebirth: the line its reborn classes follow, which the
     /// server keeps in a script variable nobody sees.
     pub past_job: Option<String>,
+    /// The towns of the `alive_towns` plugin and the town quests taken.
+    pub town_quests: crate::behaviors::town_quests::TownQuestBook,
     #[serde(skip)]
     path: PathBuf,
 }

@@ -83,6 +83,14 @@ pub struct Bot {
     pub npcs_passed: HashSet<String>,
     /// When the bot last talked to an NPC out of curiosity.
     pub last_curious: Option<Instant>,
+    /// Towns where the `alive_towns` plugin offers no quests, this run.
+    pub no_quest_towns: HashSet<String>,
+    /// The town and base level the townsfolk's offers were last asked at, and when.
+    pub offers_asked: Option<(String, u32, Instant)>,
+    /// Monsters the town quests held ask for: the hunt prefers them.
+    pub wanted_mobs: Vec<u32>,
+    /// The town quests `wanted_mobs` was worked out for.
+    pub town_quest_tasks: Vec<(crate::behaviors::town_quests::Task, bool)>,
 }
 
 impl Bot {
@@ -146,6 +154,10 @@ impl Bot {
             following: false,
             npcs_passed: HashSet::new(),
             last_curious: None,
+            no_quest_towns: HashSet::new(),
+            offers_asked: None,
+            wanted_mobs: Vec::new(),
+            town_quest_tasks: Vec::new(),
         }
     }
 

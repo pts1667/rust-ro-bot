@@ -69,6 +69,11 @@ impl TownBreak {
         }
     }
 
+    /// It sat down in its spot.
+    pub fn settled(&self) -> bool {
+        self.settled
+    }
+
     /// The break is over, or the town took too long to reach.
     pub fn over(&self) -> bool {
         match self.arrived {

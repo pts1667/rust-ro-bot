@@ -10,6 +10,7 @@ use super::skill_state::StrategicState;
 use crate::api::Observation;
 use crate::behaviors::gear::gear_budget;
 use crate::behaviors::quest::{awake, stage_place};
+use crate::behaviors::town_quests::{self, TownQuest};
 use crate::goap::Goal;
 use crate::goap::goals::HelpTask;
 use crate::goap::state::{HEAL_STOCK_MIN, HEAL_STOCK_WANTED, arrow_count, next_jobs};
@@ -42,6 +43,11 @@ const JOB_QUEST: f32 = 2.0;
 /// Score of a skill quest the bot has begun that the next job may not take: finished before the job change.
 pub const CLOSING_QUEST: f32 = 3.0;
 const SKILL_QUEST: f32 = 1.0;
+/// The option that takes the bot to a town to be paid for the town quests done.
+const TOWN_QUEST_REWARD: &str = "town_quest:reward";
+/// A town quest's ground is taken over the best one when its score is at least this share of the best: the reward
+/// pays 1.5 times the experience of the kills it asks for.
+const TOWN_QUEST_SHARE: f32 = 0.5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Opt {
@@ -330,6 +336,7 @@ async fn game_options(
             score: g.score,
         });
     }
+    out.extend(town_quest_options(snap, knowledge, &fighter, &avoid_maps, &avoid_mobs).await?);
 
     // Only with a potion shop known: without one the step can not start, and the model kept choosing it (every 7 minutes
     // in one run, a bot at level 5 after 2.5 hours)
@@ -707,6 +714,110 @@ async fn gather_option(
     Ok(None)
 }
 
+/// The town quests the bot holds (the `alive_towns` plugin): a hunt on the ground of each one not done
+/// (`town_quest:<n>`), and once one is done, the trip to the nearest town of the plugin, which pays the reward on
+/// arrival (`town_quest:reward`).
+async fn town_quest_options(
+    snap: &Snapshot,
+    knowledge: &Knowledge,
+    fighter: &Fighter,
+    avoid_maps: &HashSet<String>,
+    avoid_mobs: &HashSet<String>,
+) -> Result<Vec<Opt>> {
+    let obs = &snap.obs;
+    let quests = town_quests::held(obs);
+    if quests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let failed = |g: &Goal| snap.recent_failures.iter().any(|f| f == g);
+    let book = &snap.town_quests;
+    let hunt = Hunt::new(knowledge, fighter, &obs.map.name, town_quests::QUEST_HOPS)
+        .avoiding_maps(avoid_maps)
+        .avoiding_mobs(avoid_mobs);
+    let mut out = Vec::new();
+    for (i, q) in quests.iter().enumerate() {
+        if q.done || q.seconds_left < town_quests::MIN_SECS_LEFT {
+            continue;
+        }
+        let Some((ground, mob)) =
+            town_quests::quest_ground(&hunt, knowledge, q.task, &q.map).await?
+        else {
+            continue;
+        };
+        let goal = Goal::Hunt {
+            map: ground.map.clone(),
+        };
+        if failed(&goal) {
+            continue;
+        }
+        let (from, reward) = match book.taken(q) {
+            Some(t) => (
+                format!(" from {}", t.giver),
+                format!(
+                    ", reward {} base exp, {} job exp, {} zeny",
+                    t.base_exp, t.job_exp, t.zeny
+                ),
+            ),
+            None => Default::default(),
+        };
+        out.push(Opt {
+            id: format!("town_quest:{}", i + 1),
+            goal,
+            line: format!(
+                "town quest{from}: {} ({}/{} done, {} min left{reward}): hunt {mob} on {}",
+                q.title,
+                q.have,
+                q.count,
+                q.seconds_left / 60,
+                ground.describe()
+            ),
+            score: ground.score,
+        });
+    }
+    let done: Vec<&TownQuest> = quests.iter().filter(|q| q.done).collect();
+    if done.is_empty() || book.towns.contains(&obs.map.name) {
+        return Ok(out);
+    }
+    let mut nearest: Option<(&String, usize)> = None;
+    for town in &book.towns {
+        if let Some(route) = knowledge
+            .graph
+            .route(&obs.map.name, town, avoid_maps)
+            .await?
+            && nearest.is_none_or(|(_, hops)| route.len() < hops)
+        {
+            nearest = Some((town, route.len()));
+        }
+    }
+    let Some((town, hops)) = nearest else {
+        return Ok(out);
+    };
+    let goal = Goal::Explore { map: town.clone() };
+    if failed(&goal) {
+        return Ok(out);
+    }
+    let titles: Vec<&str> = done.iter().map(|q| q.title.as_str()).collect();
+    let (base, job, zeny) =
+        done.iter()
+            .filter_map(|q| book.taken(q))
+            .fold((0u64, 0u64, 0u64), |(b, j, z), t| {
+                (
+                    b + u64::from(t.base_exp),
+                    j + u64::from(t.job_exp),
+                    z + u64::from(t.zeny),
+                )
+            });
+    out.push(opt(
+        TOWN_QUEST_REWARD,
+        goal,
+        format!(
+            "go to {town} ({hops} warps away) for the reward of the town quests done ({}): {base} base exp, {job} job exp, {zeny} zeny",
+            titles.join(", ")
+        ),
+    ));
+    Ok(out)
+}
+
 /// The fighter a party leader picks hunting grounds for: itself brought down to the level of its weakest member in the
 /// game, so that the members it leads live where it hunts and on the way there. A leader of level 22 took a party
 /// down to level 7 to Rachel. The members' gear is unknown: only the level, HP and stats scale.
@@ -831,6 +942,10 @@ pub fn fallback(snap: &Snapshot, options: &[Opt], state: &StrategicState) -> Opt
     }) {
         return Some(o);
     }
+    // Paid for the town quests done, on arriving in a town of their townsfolk.
+    if let Some(o) = find(TOWN_QUEST_REWARD) {
+        return Some(o);
+    }
     // Better equipment the bot can pay for, potions kept aside.
     if let Some(o) = options.iter().find(|o| o.id.starts_with("gear:")) {
         return Some(o.clone());
@@ -843,6 +958,15 @@ pub fn fallback(snap: &Snapshot, options: &[Opt], state: &StrategicState) -> Opt
         .iter()
         .filter(|o| o.id.starts_with("hunt:"))
         .max_by(|a, b| a.score.total_cmp(&b.score));
+    // A town quest on a ground not much worse than the best: its reward makes up for it.
+    if let Some(o) = options
+        .iter()
+        .filter(|o| o.id.starts_with("town_quest:") && o.id != TOWN_QUEST_REWARD)
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+        && best.is_none_or(|b| o.score >= b.score * TOWN_QUEST_SHARE)
+    {
+        return Some(o.clone());
+    }
     if let Some(current) = options
         .iter()
         .find(|o| o.id.starts_with("hunt:") && Some(&o.goal) == snap.goal.as_ref())
@@ -1030,6 +1154,48 @@ mod tests {
                 .unwrap()
                 .id,
             "hunt:b"
+        );
+    }
+
+    #[test]
+    fn fallback_takes_a_town_quest_near_the_best_ground_and_then_its_reward() {
+        let snap = Snapshot::default();
+        let quest = |n: u32, map: &str, score: f32| Opt {
+            id: format!("town_quest:{n}"),
+            score,
+            ..hunt(map, score)
+        };
+        let pick = |options: &[Opt]| {
+            fallback(&snap, options, &StrategicState::default())
+                .unwrap()
+                .id
+        };
+        assert_eq!(
+            pick(&[hunt("a", 1.0), quest(1, "b", 0.4), quest(2, "c", 0.6)]),
+            "town_quest:2"
+        );
+        assert_eq!(pick(&[hunt("a", 1.0), quest(1, "b", 0.3)]), "hunt:a");
+        let reward = opt(
+            TOWN_QUEST_REWARD,
+            Goal::Explore {
+                map: "prontera".into(),
+            },
+            "",
+        );
+        let gear = opt(
+            "gear:2101",
+            Goal::BuyGear {
+                item: 2101,
+                name: "Guard".into(),
+                map: "prontera".into(),
+                x: 1,
+                y: 1,
+            },
+            "",
+        );
+        assert_eq!(
+            pick(&[hunt("a", 1.0), gear, reward, quest(1, "b", 0.9)]),
+            TOWN_QUEST_REWARD
         );
     }
 

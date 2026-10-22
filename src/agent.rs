@@ -9,6 +9,7 @@ use rand::Rng;
 
 use crate::api::{Action, ApiError, Observation, dist};
 use crate::behaviors::town_break::{TownBreak, partied};
+use crate::behaviors::town_quests;
 use crate::bot::{Bot, Outcome};
 use crate::config::RunArgs;
 use crate::goap::state::{Extra, is_loot_item};
@@ -517,6 +518,23 @@ impl Agent {
         if obs.map.name != prev.map.name {
             self.handle.events.send(Event::MapChanged).ok();
         }
+        // A town quest taken or done changes what is worth doing
+        let quests = |o: &Observation| {
+            let held = town_quests::held(o);
+            (held.len(), held.iter().filter(|q| q.done).count())
+        };
+        let (now, before) = (quests(obs), quests(prev));
+        if now.1 > before.1 {
+            self.handle
+                .events
+                .send(Event::GoalDone("a town quest".into()))
+                .ok();
+        } else if now.0 > before.0 {
+            self.handle
+                .events
+                .send(Event::GoalDone("took a town quest".into()))
+                .ok();
+        }
         if obs.me.dead && !prev.me.dead {
             // Counted here so deaths on the way somewhere count too, not only those in a fight.
             self.bot.memory.counters.deaths += 1;
@@ -577,6 +595,8 @@ impl Agent {
         }
 
         self.bot.keep = crate::quests::kept_items(&self.bot.memory.quests);
+        self.bot.keep.extend(town_quests::kept_items(&obs));
+        self.bot.follow_town_quests(&obs).await;
         // Selling is offered once a potion shop is known, and the shop was looked up only for a trip to it, which buying
         // potions starts with zeny a new character has none of: 45 of 50 new bots ended an hour with their loot unsold
         if self.bot.memory.potion_shop.is_none()
@@ -680,6 +700,19 @@ impl Agent {
                 self.run.goal_since = Instant::now();
                 self.run.step_failures = 0;
             }
+        }
+        // In a town of the alive_towns plugin, the bot asks what the townsfolk offer and takes the quests it can do. A
+        // member does it on the party's break, not while following; a bot on a break before it sits down
+        let free = !partied(&obs) || crate::party::leads(&obs) || self.run.town_break.is_some();
+        if self.run.leave_to.is_none()
+            && free
+            && !self.busy()
+            && !self.run.town_break.as_ref().is_some_and(|b| b.settled())
+            && obs.dialog.is_none()
+            && self.bot.take_town_quests(&obs).await?
+        {
+            self.run.last_outcome = "asked the townsfolk for quests".into();
+            return Ok(());
         }
         // A bot on a break walks to its town, and there sits among the others
         if self.run.leave_to.is_none()
@@ -921,6 +954,7 @@ impl Agent {
             job_target: self.bot.memory.strategy.job_target.clone(),
             can_heal: self.bot.can_heal(obs),
             deadly_ways: self.bot.recent_deadly_ways(),
+            town_quests: self.bot.memory.town_quests.clone(),
         };
         self.handle.snapshots.send_replace(Some(snap));
     }

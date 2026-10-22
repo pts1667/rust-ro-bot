@@ -169,6 +169,19 @@ pub enum Action {
         amount: u32,
     },
     StorageClose,
+    /// Runs an action a plugin offers to bots (`plugins.<name>.actions`); the answer carries the plugin's `reply`.
+    Plugin {
+        plugin: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    /// Clicks a button of a window a plugin opened for the bot.
+    PluginUi {
+        plugin: String,
+        window: String,
+        widget: String,
+        kind: &'static str,
+    },
 }
 
 impl Action {
@@ -227,6 +240,8 @@ impl Action {
             Action::VendingClose => "vending_close",
             Action::StorageDeposit { .. } => "storage_deposit",
             Action::StorageClose => "storage_close",
+            Action::Plugin { .. } => "plugin",
+            Action::PluginUi { .. } => "plugin_ui",
         }
     }
 }

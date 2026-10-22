@@ -120,6 +120,9 @@ impl Bot {
             {
                 value *= ASSIST_BONUS;
             }
+            if self.wanted_mobs.contains(&mob.mob_id) {
+                value *= crate::behaviors::town_quests::WANTED_BONUS;
+            }
             if best.as_ref().is_none_or(|(v, _, _)| value > *v) {
                 best = Some((value, mob.id, mob.name.clone()));
             }

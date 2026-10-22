@@ -8,6 +8,7 @@ pub mod gear;
 pub mod progression;
 pub mod quest;
 pub mod town_break;
+pub mod town_quests;
 pub mod travel;
 
 use anyhow::Result;

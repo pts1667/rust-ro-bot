@@ -1,6 +1,8 @@
 //! Typed view of `GET /bots/{name}/observation`. Every field defaults, so a missing or newly added field
 //! never breaks the bot. Parts the bot does not act on (storage, companions…) stay raw JSON.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -39,6 +41,88 @@ pub struct Observation {
     pub cart: Option<Vec<CartItem>>,
     /// The bot's vending store while it is open.
     pub vending: Option<Value>,
+    /// What the server's plugins show the bot, by plugin name: the windows they opened for it, what they let bots
+    /// read, the actions they offer. A plugin that is off, or has nothing to show, is not there.
+    pub plugins: BTreeMap<String, PluginView>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PluginView {
+    pub windows: Vec<PluginWindow>,
+    /// Whatever the plugin lets bots read, under keys it picked.
+    pub data: Value,
+    /// The actions of `plugin` it offers.
+    pub actions: Vec<PluginAction>,
+}
+
+impl PluginView {
+    pub fn offers_action(&self, name: &str) -> bool {
+        self.actions.iter().any(|a| a.name == name)
+    }
+
+    pub fn window(&self, id: &str) -> Option<&PluginWindow> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PluginAction {
+    pub name: String,
+    pub description: String,
+}
+
+/// A window a plugin opened for the bot, as a game client would draw it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PluginWindow {
+    pub id: String,
+    pub title: String,
+    /// Absent for an ordinary window; `anchored` above a unit (`unit_id`), or `hud`.
+    pub placement: Option<Placement>,
+    /// The tree of nodes: `column`, `row`, `text`, `button`...
+    pub node: Value,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Placement {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub unit_id: Option<u64>,
+}
+
+impl PluginWindow {
+    /// The unit the window shows above, for a bubble.
+    pub fn anchored_to(&self) -> Option<u64> {
+        self.placement
+            .as_ref()
+            .filter(|p| p.kind == "anchored")
+            .and_then(|p| p.unit_id)
+    }
+
+    /// The ids of its enabled buttons, in the order they show.
+    pub fn buttons(&self) -> Vec<String> {
+        fn walk(node: &Value, out: &mut Vec<String>) {
+            match node {
+                Value::Object(fields) => {
+                    if fields.get("type").and_then(Value::as_str) == Some("button")
+                        && fields.get("enabled").and_then(Value::as_bool) != Some(false)
+                        && let Some(id) = fields.get("id").and_then(Value::as_str)
+                    {
+                        out.push(id.to_owned());
+                    }
+                    fields.values().for_each(|v| walk(v, out));
+                }
+                Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.node, &mut out);
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

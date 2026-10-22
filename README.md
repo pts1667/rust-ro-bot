@@ -185,6 +185,7 @@ All of these go in the server's `config.json`. Restart the server after changing
 | `game.base_exp_rate`, `game.job_exp_rate` | Experience rates, for faster test runs. |
 | `game.sim_speed` | Runs the game clock faster than real time, for test runs. |
 | `scripting.test_npcs` | Places the test NPCs: the Job Master, warpers, the Prontera item mall. Off by default: bots then take the guilds' job quests (Swordman in Izlude, Mage in Geffen, Archer in Payon, Acolyte in Prontera, Merchant in Alberta, Thief in Morocc). Delete `cache/db/` after changing it. |
+| `scripting.plugins` | `{ "name": "alive_towns", "enabled": true }` puts townsfolk in the towns, some of whom give out short hunting and gathering quests. Bots take the quests they can do, do them, and go back to a town to collect the reward. Off, bots don't look for these quests. |
 
 ## Troubleshooting
 

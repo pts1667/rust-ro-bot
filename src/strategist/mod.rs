@@ -84,6 +84,8 @@ pub struct Snapshot {
     pub can_heal: bool,
     /// Maps the bot died crossing lately: no hunting ground on a way through them.
     pub deadly_ways: Vec<String>,
+    /// The towns of the `alive_towns` plugin and the town quests taken, with their rewards.
+    pub town_quests: crate::behaviors::town_quests::TownQuestBook,
 }
 
 /// Why the strategist should think now. The texts are only read through `Debug`, in the trigger log.
