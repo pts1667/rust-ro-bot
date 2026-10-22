@@ -38,6 +38,9 @@ use skill_state::StrategicState;
 const LOOKUP_ROUNDS: usize = 8;
 /// Lookups run per round; extra calls are answered with a refusal.
 const LOOKUPS_PER_ROUND: usize = 8;
+/// The user turn after a plain-text answer: llama.cpp reads one trailing assistant message as a prefill to continue
+/// and refuses two.
+const COMMIT_NUDGE: &str = "Call commit now with your choice.";
 /// Quests returned per `quest_info` search: a job change has one quest per guild NPC.
 const QUEST_HITS: u32 = 4;
 
@@ -759,8 +762,9 @@ pub async fn llm_turn(step: Step<'_>, user: String) -> Result<LlmDecision> {
     let mut session = ChatSession::with_system_prompt(system);
     session.push_user(user);
     let mut done_lookups = Vec::new();
+    let mut force = false;
     for round in 0..=LOOKUP_ROUNDS {
-        let last = round == LOOKUP_ROUNDS;
+        let last = round == LOOKUP_ROUNDS || std::mem::take(&mut force);
         let (provider, registry) = if last {
             (&llm.forced, &commit_only)
         } else {
@@ -795,6 +799,11 @@ pub async fn llm_turn(step: Step<'_>, user: String) -> Result<LlmDecision> {
             {
                 return finish(args, options, done_lookups, cost);
             }
+            if last {
+                break;
+            }
+            session.push_user(COMMIT_NUDGE);
+            force = true;
             continue;
         }
         // The model tends to fire many lookups at once; run the first few, answer the rest with a refusal
