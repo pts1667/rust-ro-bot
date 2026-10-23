@@ -31,6 +31,10 @@ use chat::Said;
 pub const SIGHT: u32 = 14;
 /// A follower walks back to the one it follows when further than this.
 const FOLLOW_FAR: u32 = 7;
+/// How far the followed player moves from where the walk was sent before the walk is sent again.
+const FOLLOW_REAIM: u32 = 2;
+/// The pause after starting a walk after a player, before the next look at where it went.
+const FOLLOW_STEP_MS: u64 = 400;
 /// Most warps a member goes to follow; further, it plays by itself until the one it follows is near again.
 const FOLLOW_HOPS: u32 = 6;
 /// How long the answer to "can I follow to that map" holds.
@@ -38,7 +42,7 @@ const FOLLOW_CHECK_EVERY: Duration = Duration::from_secs(120);
 /// How long the bot follows a member who said "follow me" before it goes back to the leader.
 const FOLLOW_MEMBER_LASTS: Duration = Duration::from_secs(600);
 /// A follower fights monsters this close to the one it follows.
-const ASSIST_RADIUS: u32 = 10;
+const ASSIST_RADIUS: u32 = 24;
 /// Basic Skill level that creating a party takes.
 const BASIC_SKILL_TO_CREATE: u32 = 7;
 const CREATE_EVERY: Duration = Duration::from_secs(30);
@@ -787,7 +791,8 @@ impl Bot {
         Ok(Outcome::Done)
     }
 
-    /// Walks to a cell next to `there` (or onto it).
+    /// Starts a walk to a cell next to `there` (or onto it) without waiting for it: the next step aims it again at
+    /// where the followed player is by then. A waiting walk ran to the old spot first, however the player turned.
     pub(crate) async fn walk_next_to(
         &mut self,
         obs: &Observation,
@@ -798,16 +803,27 @@ impl Bot {
             Bot::pause(800).await;
             return Ok(Outcome::Done);
         }
+        if obs.me.action == "moving"
+            && self
+                .follow_to
+                .is_some_and(|to| dist(to, there) <= FOLLOW_REAIM)
+        {
+            Bot::pause(FOLLOW_STEP_MS).await;
+            return Ok(Outcome::Done);
+        }
         for (dx, dy) in [(1, 1), (-1, 1), (1, -1), (-1, -1), (0, 0), (2, 0), (0, 2)] {
             let x = (there.0 as i32 + dx).max(0) as u16;
             let y = (there.1 as i32 + dy).max(0) as u16;
             if obs.near_warp((x, y), 0) {
                 continue;
             }
-            if self.act(Action::Move { x, y, wait: true }).await.is_ok() {
+            if self.act(Action::Move { x, y, wait: false }).await.is_ok() {
+                self.follow_to = Some(there);
+                Bot::pause(FOLLOW_STEP_MS).await;
                 return Ok(Outcome::Done);
             }
         }
+        self.follow_to = None;
         Ok(Outcome::failed("cannot walk to the party"))
     }
 

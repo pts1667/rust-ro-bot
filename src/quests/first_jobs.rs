@@ -366,7 +366,10 @@ fn mage() -> Quest {
                 GUILDSMAN.3,
             )
             .menu(&["I want to be a Mage.", "Sign Up."])
-            .done(Check::Item(TUBE)),
+            // Signed now, or before (he reads the test back). A tube alone does not tell: it is sold in the guild.
+            .said("Sign right there")
+            .said("test was")
+            .keep(&[TUBE]),
             talk(
                 "ask the Mage Guildsman which solution to mix",
                 GUILDSMAN.0,
@@ -375,6 +378,7 @@ fn mage() -> Quest {
                 GUILDSMAN.3,
             )
             .menu(&["Tell me the Requirements."])
+            .back_if("after signing the application form", 0)
             .done(Check::Quest(1005))
             .done(Check::Quest(1006))
             .done(Check::Quest(1007))
@@ -504,8 +508,10 @@ fn mage() -> Quest {
     )
 }
 
-/// The Archer Guild of Payon (`archer.txt`): Trunks graded 25 points or more. Willows drop the Trunks (1 point
-/// each); the better woods are worth more. Quest window: 1004.
+/// The Archer Guild of Payon (`archer.txt`): Trunks graded 25 points or more. Willows drop them all: the Barren Trunk
+/// (2 points) at 35%, the Solid (3) at 20%, the Fine-grained (5) at 10%, the plain Trunk (1) at 1%. Quest window: 1004.
+const TRUNKS: &[(u32, u32)] = &[(1068, 2), (1067, 3), (1066, 5), (1019, 1)];
+
 fn archer() -> Quest {
     const GUILDSMAN: (&str, &str, u16, u16) = ("payon_in02", "Archer Guildsman", 64, 71);
     const MENU: &[&str] = &["I want to be an Archer.", "Apply.", "Yes, I am."];
@@ -522,7 +528,7 @@ fn archer() -> Quest {
             .menu(MENU)
             .done(Check::Quest(1004))
             .done(Check::Job("Archer")),
-            gather("gather 25 Trunks", &[(1019, 25)]).log(&[1004]),
+            gather_points("gather Trunks worth 25 points", TRUNKS, 25).log(&[1004]),
             talk(
                 "bring the Trunks to the Archer Guildsman",
                 GUILDSMAN.0,
@@ -784,7 +790,9 @@ fn thief() -> Quest {
             )
             .done(Check::OnMap("job_thief1"))
             .log(&[1013]),
+            // The Spores of the farm leave the bot alone, but one picked as a target (lv 16, 510 HP) killed every novice
             fight("pick mushrooms worth 25 points on the farm", "job_thief1")
+                .spare(&["Spore"])
                 .until(Check::Points(MUSHROOMS, 25))
                 .passed(Check::Points(MUSHROOMS, 25))
                 .log(&[1013]),

@@ -79,6 +79,8 @@ pub struct Bot {
     pub exploring: Option<String>,
     /// The bot is on its way after a party member: no stops to talk to NPCs on the way.
     pub following: bool,
+    /// Where the last walk after a followed player was sent: the next step sends a new one only when it moved.
+    pub follow_to: Option<(u16, u16)>,
     /// NPCs (`map:name`) the bot walked past without talking to them, this run: one roll each.
     pub npcs_passed: HashSet<String>,
     /// When the bot last talked to an NPC out of curiosity.
@@ -152,6 +154,7 @@ impl Bot {
             first_menu: Vec::new(),
             exploring: None,
             following: false,
+            follow_to: None,
             npcs_passed: HashSet::new(),
             last_curious: None,
             no_quest_towns: HashSet::new(),

@@ -134,7 +134,7 @@ enum Walk {
     Preempted,
 }
 
-fn journey(result: &Value) -> &str {
+pub(crate) fn journey(result: &Value) -> &str {
     result.get("journey").and_then(Value::as_str).unwrap_or("")
 }
 

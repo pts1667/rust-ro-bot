@@ -28,3 +28,4 @@ rustc-ice-*.txt
 /cache/
 /state/
 /logs
+__pycache__

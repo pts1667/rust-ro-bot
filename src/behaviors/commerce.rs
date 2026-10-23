@@ -23,6 +23,31 @@ const SHOP_SWITCH_HOPS: u32 = 2;
 /// Share of the zeny left after potions that arrows may take.
 const ARROW_BUDGET: f32 = 0.5;
 
+/// Farthest cell from a shop NPC tried when the near ones are walls.
+const SHOP_APPROACH: i16 = 4;
+
+/// The cells tried to stand at a shop, as offsets from its NPC: in front of the counter first, then the sides, then
+/// the rings around it out to `SHOP_APPROACH`, nearest first.
+fn shop_approach() -> Vec<(i16, i16)> {
+    let mut cells = vec![
+        (0, -2),
+        (0, 2),
+        (-2, 0),
+        (2, 0),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ];
+    let mut ring: Vec<(i16, i16)> = (-SHOP_APPROACH..=SHOP_APPROACH)
+        .flat_map(|dx| (-SHOP_APPROACH..=SHOP_APPROACH).map(move |dy| (dx, dy)))
+        .filter(|&(dx, dy)| (dx, dy) != (0, 0) && !cells.contains(&(dx, dy)))
+        .collect();
+    ring.sort_by_key(|&(dx, dy)| (dx.abs().max(dy.abs()), dx.abs() + dy.abs()));
+    cells.extend(ring);
+    cells
+}
+
 impl Bot {
     /// The shop the bot uses: the seller of Red Potion nearest to `from`. The one it knows is kept unless another is
     /// at least `SHOP_SWITCH_HOPS` warps closer (checked once per map).
@@ -117,17 +142,9 @@ impl Bot {
         }
         let mut walk_error = None;
         if dist(self.observe().await?.pos(), (shop.x, shop.y)) > 4 {
-            // In front of the counter, else any side of it: the cell below the Tool Dealer of alberta_in is a wall
-            for (dx, dy) in [
-                (0, -2),
-                (0, 2),
-                (-2, 0),
-                (2, 0),
-                (-1, -1),
-                (1, -1),
-                (-1, 1),
-                (1, 1),
-            ] {
+            // In front of the counter, else any side of it, then farther out: every cell 2 around the Tool Dealer of
+            // alberta_in is a wall
+            for (dx, dy) in shop_approach() {
                 let (Some(x), Some(y)) =
                     (shop.x.checked_add_signed(dx), shop.y.checked_add_signed(dy))
                 else {
@@ -139,6 +156,18 @@ impl Bot {
                         break;
                     }
                     Err(error) => walk_error = Some(error.to_string()),
+                }
+            }
+            if let Some(error) = &walk_error {
+                // No cell near it can be walked to: another shop from now on, else the bot gives up selling for good
+                self.memory.note(format!(
+                    "cannot stand at {} on {} ({error}), looking for another shop",
+                    shop.name, shop.map
+                ));
+                self.memory
+                    .mark_bad_shop(format!("{}:{},{}", shop.map, shop.x, shop.y));
+                if self.memory.potion_shop.as_ref() == Some(shop) {
+                    self.memory.potion_shop = None;
                 }
             }
         }

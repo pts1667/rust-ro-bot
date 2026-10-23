@@ -64,6 +64,8 @@ pub struct Stage {
     pub done: Vec<Check>,
     /// Gear to wear for this stage (a Rosary for the Crusader quest).
     pub wear: Option<u32>,
+    /// Items the quest needs later that no check of this stage looks at (the Mage test's Empty Test Tube): not to sell.
+    pub keep: &'static [u32],
     /// It happens on a map only the stage before leads to (a test room): away from it, that stage is done again.
     pub inside: bool,
     /// When the dialogue of this stage says the text, the quest goes back to that stage (a test to take again).
@@ -188,6 +190,8 @@ pub enum Need {
     Assigned,
     Zeny(u64),
     ItemsAndZeny(Items, u64),
+    /// Items worth this many points together, each its points (the Archer's trunks). The first one is hunted.
+    Points(Items, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -474,13 +478,14 @@ impl Quest {
                 }
             }
             match &stage.act {
-                Act::Gather(Need::Items(items) | Need::ItemsAndZeny(items, _)) => {
-                    v.extend(items.iter().map(|(i, _)| *i))
-                }
+                Act::Gather(
+                    Need::Items(items) | Need::ItemsAndZeny(items, _) | Need::Points(items, _),
+                ) => v.extend(items.iter().map(|(i, _)| *i)),
                 Act::Talk(t) => v.extend(t.assigns.iter().flat_map(|s| s.iter().map(|(i, _)| *i))),
                 _ => {}
             }
             v.extend(stage.wear);
+            v.extend(stage.keep);
         }
         v.sort_unstable();
         v.dedup();
@@ -519,6 +524,13 @@ pub fn missing(need: &Need, progress: &QuestProgress, obs: &Observation) -> Vec<
         Need::Items(items) | Need::ItemsAndZeny(items, _) => items.to_vec(),
         Need::Assigned => progress.assigned.clone(),
         Need::Zeny(_) => Vec::new(),
+        Need::Points(items, wanted) => {
+            let short = wanted.saturating_sub(points(items, obs));
+            return match items.first() {
+                Some(&(id, worth)) if short > 0 => vec![(id, short.div_ceil(worth.max(1)))],
+                _ => Vec::new(),
+            };
+        }
     };
     items
         .into_iter()
@@ -581,6 +593,7 @@ pub mod build {
             act,
             done,
             wear: None,
+            keep: &[],
             inside,
             back: Vec::new(),
             log: &[],
@@ -613,6 +626,11 @@ pub mod build {
 
     pub fn gather(what: &'static str, items: Items) -> Stage {
         stage(what, Act::Gather(Need::Items(items)), Vec::new(), false)
+    }
+
+    /// Items worth `wanted` points together, see `Need::Points`.
+    pub fn gather_points(what: &'static str, items: Items, wanted: u32) -> Stage {
+        stage(what, Act::Gather(Need::Points(items, wanted)), Vec::new(), false)
     }
 
     pub fn gather_assigned(what: &'static str) -> Stage {
@@ -781,7 +799,6 @@ pub mod build {
         }
 
         /// When the NPC says `text`, the quest goes back to stage `stage` (a failed test to take again).
-        #[allow(dead_code)]
         pub fn back_if(mut self, text: &'static str, stage: usize) -> Self {
             self.back.push((text, stage));
             self
@@ -815,6 +832,12 @@ pub mod build {
 
         pub fn wear(mut self, item: u32) -> Self {
             self.wear = Some(item);
+            self
+        }
+
+        /// Items not to sell while the quest is taken up, see `Stage::keep`.
+        pub fn keep(mut self, items: &'static [u32]) -> Self {
+            self.keep = items;
             self
         }
 
@@ -1138,5 +1161,32 @@ mod tests {
             ..Default::default()
         });
         assert!(check.holds(&obs, &[]));
+    }
+
+    #[test]
+    fn archer_trunks_are_gathered_by_their_grade() {
+        let need = Need::Points(&[(1068, 2), (1067, 3), (1066, 5), (1019, 1)], 25);
+        let fresh = QuestProgress::default();
+        let mut obs = Observation::default();
+        // Nothing yet: Barren Trunks, the commonest, for all 25 points.
+        assert_eq!(missing(&need, &fresh, &obs), vec![(1068, 13)]);
+        for (item_id, amount) in [(1066, 3), (1067, 2), (1019, 1)] {
+            obs.inventory.push(InventoryItem {
+                item_id,
+                amount,
+                ..Default::default()
+            });
+        }
+        // 15 + 6 + 1 = 22 points: 3 short, two Barren Trunks.
+        assert_eq!(missing(&need, &fresh, &obs), vec![(1068, 2)]);
+        obs.inventory.push(InventoryItem {
+            item_id: 1068,
+            amount: 2,
+            ..Default::default()
+        });
+        assert!(missing(&need, &fresh, &obs).is_empty());
+        // Every grade is kept from the shops.
+        let archer = find("job:Archer").unwrap();
+        assert!([1066, 1067, 1068, 1019].iter().all(|i| archer.items().contains(i)));
     }
 }

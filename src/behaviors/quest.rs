@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use super::dialog::{Intent, dialog_of};
+use super::travel::journey;
 use crate::api::client::MapGrid;
 use crate::api::{Action, BuyLine, Observation, SellLine, dist};
 use crate::bot::{Bot, Outcome};
@@ -32,6 +33,9 @@ const UNBURDEN_ROUNDS: u32 = 12;
 const FREE_TICKET: u32 = 7059;
 /// Slots of the inventory.
 const INVENTORY_SLOTS: u32 = 100;
+/// Walks on to an NPC after one the server's action timeout ended: Father Rubalkabara is ~350 cells (52 s) from the
+/// way into `prt_fild03`.
+const WALK_ON: u32 = 4;
 /// Most of one item in a slot.
 const STACK: u64 = 30_000;
 
@@ -461,7 +465,7 @@ impl Bot {
         };
         let mut said = Vec::new();
         for n in 0..talk.times.max(1) {
-            let result = match self.act(Action::Use { target: npc }).await {
+            let mut result = match self.act(Action::Use { target: npc }).await {
                 Ok(r) => r,
                 Err(error) if n > 0 => {
                     tracing::debug!(%error, "talking again refused");
@@ -474,6 +478,23 @@ impl Bot {
                     )));
                 }
             };
+            // A long walk to the NPC ends before it gets there: the talk has not happened, whatever `use` answered.
+            for _ in 0..WALK_ON {
+                if journey(&result) != "timeout" || self.preempted() {
+                    break;
+                }
+                result = self.act(Action::Use { target: npc }).await?;
+            }
+            if matches!(journey(&result), "timeout" | "stopped") {
+                let why = result
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("too far");
+                return Ok(Outcome::failed(format!(
+                    "did not reach {} ({why})",
+                    talk.npc
+                )));
+            }
             let end = self.run_dialog(dialog_of(&result), &intent).await?;
             tracing::debug!(?end, "quest dialogue ended");
             said.extend(self.last_dialog.drain(..));
