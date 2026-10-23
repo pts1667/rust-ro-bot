@@ -1,6 +1,7 @@
 //! Logging: everything to the terminal, or with `--log-dir` the events of each bot (those inside its `bot` span) to a
 //! file of its own and the rest to the terminal.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs::File;
 use std::path::Path;
@@ -8,9 +9,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
 use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id};
-use tracing::{Metadata, Subscriber};
-use tracing_subscriber::filter::dynamic_filter_fn;
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -27,51 +27,87 @@ pub fn init(dir: Option<&Path>, bots: &[String]) -> Result<()> {
         return Ok(());
     };
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+    let mut files = HashMap::new();
     for bot in bots {
         let path = dir.join(format!("{bot}.log"));
         let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        let bot = bot.clone();
-        layers.push(
+        files.insert(
+            bot.clone(),
             fmt::layer()
                 .with_ansi(false)
                 .with_writer(Mutex::new(file))
-                .with_filter(dynamic_filter_fn(move |meta, cx| {
-                    // Every span passes, or the bot's own span would be missing from the lookup below
-                    meta.is_span() || bot_is(cx, |b| b == Some(bot.as_str()))
-                }))
                 .boxed(),
         );
     }
-    layers.push(
-        fmt::layer()
-            .with_filter(dynamic_filter_fn(|meta: &Metadata<'_>, cx| {
-                meta.is_span() || bot_is(cx, |b| b.is_none())
-            }))
-            .boxed(),
-    );
+    let router = PerBot {
+        files,
+        rest: fmt::layer().boxed(),
+    };
     tracing_subscriber::registry()
-        .with(layers)
+        .with(router)
         .with(BotNames)
         .with(filter)
         .init();
     Ok(())
 }
 
-/// Whether `test` holds for the bot of the span the event comes in (`None` outside of every bot).
-fn bot_is<S>(cx: &Context<'_, S>, test: impl Fn(Option<&str>) -> bool) -> bool
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    let Some(span) = cx.lookup_current() else {
-        return test(None);
-    };
-    for s in span.scope() {
-        if let Some(b) = s.extensions().get::<BotName>() {
-            return test(Some(&b.0));
+type Boxed = Box<dyn Layer<Registry> + Send + Sync>;
+
+/// Writes each event to the log of the bot whose span it comes in, the others to `rest`. One layer routing, not a
+/// filtered layer per bot: tracing-subscriber takes at most 64 per-layer filters, and 200 bots panicked at start.
+struct PerBot {
+    files: HashMap<String, Boxed>,
+    rest: Boxed,
+}
+
+impl PerBot {
+    /// The layer that formats span fields, kept in the span for every layer: one without colours, else the files
+    /// get the terminal's escape codes.
+    fn fields(&self) -> &Boxed {
+        self.files.values().next().unwrap_or(&self.rest)
+    }
+
+    fn all(&mut self) -> impl Iterator<Item = &mut Boxed> {
+        self.files.values_mut().chain(std::iter::once(&mut self.rest))
+    }
+}
+
+impl Layer<Registry> for PerBot {
+    fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
+        for layer in self.files.values().chain(std::iter::once(&self.rest)) {
+            layer.on_register_dispatch(subscriber);
         }
     }
-    test(None)
+
+    fn on_layer(&mut self, subscriber: &mut Registry) {
+        for layer in self.all() {
+            layer.on_layer(subscriber);
+        }
+    }
+
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, cx: Context<'_, Registry>) {
+        self.fields().on_new_span(attrs, id, cx);
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, cx: Context<'_, Registry>) {
+        self.fields().on_record(id, values, cx);
+    }
+
+    fn on_close(&self, id: Id, cx: Context<'_, Registry>) {
+        self.fields().on_close(id, cx);
+    }
+
+    fn on_event(&self, event: &Event<'_>, cx: Context<'_, Registry>) {
+        let bot = cx.event_scope(event).and_then(|scope| {
+            scope
+                .into_iter()
+                .find_map(|s| s.extensions().get::<BotName>().map(|b| b.0.clone()))
+        });
+        match bot.and_then(|b| self.files.get(&b)) {
+            Some(layer) => layer.on_event(event, cx),
+            None => self.rest.on_event(event, cx),
+        }
+    }
 }
 
 /// The bot a span belongs to, kept by `BotNames`.
