@@ -94,6 +94,9 @@ impl<'a> Hunt<'a> {
     }
 }
 
+/// Danger of a fight (`Assessment::danger`, the share of the bot's HP it costs) the bot does not live through.
+const LOST_FIGHT: f32 = 1.0;
+
 /// Scores one map. `None` when nothing on it is worth fighting.
 pub fn score_map(
     map: &MapData,
@@ -117,8 +120,12 @@ pub fn score_map(
             .iter()
             .any(|n| n.eq_ignore_ascii_case(&mob.name_english));
         // However few, an aggressive monster that kills in two hits makes the map no place to hunt (Drosera lv 46 on
-        // ra_fild08, among Drops and Stapo, killed a lv 28 Swordsman with 548 HP).
-        if mob.aggressive() && !mob.boss() && fighter.lethal_in_two(mob) {
+        // ra_fild08, among Drops and Stapo, killed a lv 28 Swordsman with 548 HP); nor one the bot cannot outlast:
+        // the lone Vocal of prt_fild07 (lv 18, 3016 HP, and Rockers it calls) killed 77 novices in an hour.
+        if mob.aggressive()
+            && !mob.boss()
+            && (fighter.lethal_in_two(mob) || a.danger >= LOST_FIGHT)
+        {
             return None;
         }
         if mob.boss() || a.danger >= SAFE_DANGER || avoided {
@@ -454,7 +461,8 @@ mod tests {
             armor_def: 1,
         };
         let poring = mob(1, "Poring", 1, 50, 8, 2, 0x83);
-        let brute = mob(2, "Brute", 30, 3000, 30, 500, 0x84);
+        // Too strong to hunt, not so strong the fight is lost: that rules the map out
+        let brute = mob(2, "Brute", 30, 40, 30, 500, 0x84);
         let calm = MapData {
             name: "calm".into(),
             mob_spawns: vec![spawn(1, 100)],
@@ -493,6 +501,37 @@ mod tests {
         // A passive one does not.
         let calm = mob(2, "Drosera", 46, 7221, 589, 2612, 0x81);
         assert!(score_map(&map, &[drops, calm], &me, 0, &HashSet::new()).is_some());
+    }
+
+    #[test]
+    fn a_lone_aggressive_monster_the_bot_cannot_outlast_rules_the_map_out() {
+        // Zykemar, killed by the Vocal of prt_fild07
+        let me = Fighter {
+            level: 18,
+            max_hp: 264,
+            str: 22,
+            agi: 15,
+            vit: 7,
+            dex: 14,
+            luk: 1,
+            weapon_atk: 17,
+            armor_def: 1,
+        };
+        let rocker = mob(1, "Rocker", 9, 198, 24, 20, 0x81);
+        let vocal = mob(2, "Vocal", 18, 3016, 76, 110, 0x3695);
+        assert!(!me.lethal_in_two(&vocal));
+        let map = MapData {
+            name: "prt_fild07".into(),
+            mob_spawns: vec![spawn(1, 80), spawn(2, 1)],
+            ..Default::default()
+        };
+        assert!(score_map(&map, &[rocker.clone(), vocal], &me, 0, &HashSet::new()).is_none());
+        // Rockers alone are fine.
+        let calm = MapData {
+            mob_spawns: vec![spawn(1, 80)],
+            ..map
+        };
+        assert!(score_map(&calm, &[rocker], &me, 0, &HashSet::new()).is_some());
     }
 
     #[test]

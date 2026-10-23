@@ -75,9 +75,18 @@ pub struct Transport {
     pub checks: Vec<String>,
     /// Walking into its area is what sends a character on (a warp written as a script), not talking to it.
     pub touch: bool,
+    /// The cells around it that send a character on when `touch`.
+    pub area: TouchArea,
     /// The places it sends to; a warper's is a link to `/db/destinations` instead, so it is read loosely: a map that
     /// failed to parse dropped out of the graph, and with it every town that has a warper.
     pub to: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TouchArea {
+    pub x_size: u16,
+    pub y_size: u16,
 }
 
 impl Transport {
@@ -105,7 +114,10 @@ impl Transport {
     /// sends back whoever it refuses (`jawaiiwarp006` of `jawaii_in`, for the married).
     pub fn random_warp(&self, map: &str) -> bool {
         let to = self.destinations();
+        // No area, no way in: prontera's `#to_agit_main_gate` at (1, 1) "led" to the ten castles, and the trips to
+        // yuno and einbroch that took it walked at that wall 30 times and gave up
         self.touch
+            && (self.area.x_size > 0 || self.area.y_size > 0)
             && self.checks.is_empty()
             && to.len() > 1
             && to.iter().all(|(m, x, y, _)| {
@@ -504,6 +516,22 @@ mod tests {
         assert!(!map.transports[0].gates("prt_sewb1"));
         assert!(map.transports[1].gates("prt_sewb1"));
         assert!(!map.transports[1].gates("prt_fild05"));
+    }
+
+    #[test]
+    fn a_touch_npc_without_an_area_is_no_random_warp() {
+        let landing = |map: &str, x: u16| serde_json::json!({"map": {"id": map}, "x": x, "y": 10, "region": 1});
+        let warp = |x_size: u16| -> Transport {
+            serde_json::from_value(serde_json::json!({
+                "x": 1, "y": 1, "touch": true, "checks": [],
+                "area": {"x_size": x_size, "y_size": x_size},
+                "to": [landing("schg_cas01", 369), landing("arug_cas01", 157)],
+            }))
+            .unwrap()
+        };
+        // prontera's #to_agit_main_gate
+        assert!(!warp(0).random_warp("prontera"));
+        assert!(warp(1).random_warp("prontera"));
     }
 
     #[test]

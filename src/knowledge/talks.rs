@@ -46,6 +46,8 @@ struct NpcWay {
     keywords: &'static [&'static str],
     /// Routes may go through it: the bot lands next to a guard and asks the nearest one, so it never crosses the map.
     through: bool,
+    /// The zeny it takes.
+    fare: u64,
 }
 
 /// The NPC ways the bot knows to ask for. moc_fild20 has no warp out, only a Continental Guard at every landing, who
@@ -58,12 +60,30 @@ const NPC_WAYS: &[NpcWay] = &[
         to: "morocc",
         keywords: &["ask what happened", "ask about guard", "please do"],
         through: true,
+        fare: 0,
     },
     NpcWay {
         names: &["Continental Guard#07", "Continental Guard#08"],
         to: "moc_fild01",
         keywords: &["prontera field"],
         through: false,
+        fare: 0,
+    },
+    // Byalan Island has no warp from land: the Sailor of Izlude's dock is the way there (the Merchant's last delivery),
+    // and the one on the island the way back
+    NpcWay {
+        names: &["Sailor"],
+        to: "izlu2dun",
+        keywords: &["byalan island"],
+        through: true,
+        fare: 150,
+    },
+    NpcWay {
+        names: &["Sailor"],
+        to: "izlude",
+        keywords: &["yeah, i'm tired"],
+        through: true,
+        fare: 0,
     },
 ];
 
@@ -76,7 +96,7 @@ pub fn npc_way(npc: &str, to: &str) -> Option<Talk> {
         npc: npc.to_owned(),
         names: way.names.iter().map(|n| (*n).to_owned()).collect(),
         keywords: way.keywords.iter().map(|k| (*k).to_owned()).collect(),
-        fare: 0,
+        fare: way.fare,
         through: way.through,
     })
 }
@@ -239,6 +259,15 @@ pub fn teleporters(data: &MapData) -> Vec<(u16, u16, Option<u32>, &'static str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sailors_ferry_to_byalan_island_and_back() {
+        let there = npc_way("Sailor#izlude", "izlu2dun").unwrap();
+        assert_eq!((there.fare, there.keywords.as_slice()), (150, &["byalan island".to_owned()][..]));
+        assert!(npc_way("Sailor#2izlude", "izlude").is_some_and(|t| t.fare == 0));
+        // The dock's Sailor also sails to Alberta, a way the bot does not take
+        assert!(npc_way("Sailor#izlude", "alberta").is_none());
+    }
 
     #[test]
     fn npcs_are_known_by_name_and_hidden_part() {

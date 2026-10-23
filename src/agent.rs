@@ -564,7 +564,7 @@ impl Agent {
         }
         if obs.me.hp_frac() < 0.25
             && obs.me.action == "attacking"
-            && let Some(heal) = self.bot.knowledge.heal_action(&obs)
+            && let Some(heal) = self.bot.knowledge.heal_action(&obs, &self.bot.keep)
         {
             self.bot.act(heal.action).await.ok();
         }

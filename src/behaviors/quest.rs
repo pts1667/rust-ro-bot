@@ -511,7 +511,7 @@ impl Bot {
     /// Takes a potion when HP runs low; true when it did.
     async fn heal_in_test(&mut self, obs: &Observation) -> bool {
         if obs.me.hp_frac() < TEST_HEAL_AT
-            && let Some(heal) = self.knowledge.heal_action(obs)
+            && let Some(heal) = self.knowledge.heal_action(obs, &self.keep)
         {
             return self.act(heal.action).await.is_ok();
         }

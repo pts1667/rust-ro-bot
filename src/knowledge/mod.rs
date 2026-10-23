@@ -141,26 +141,33 @@ impl Knowledge {
             .sum()
     }
 
-    /// The heal to use now: the smallest item or skill that heals the missing HP completely, else the biggest.
-    pub fn heal_action(&self, obs: &Observation) -> Option<Heal> {
+    /// The heal to use now: the smallest item or skill that heals the missing HP completely, else the biggest. The items
+    /// of `keep` (a quest's) only when nothing else heals: a novice ate the Red Herbs First Aid asks for as it found
+    /// them, and hunted Lunatics for "1 more Red Herb" for two hours.
+    pub fn heal_action(&self, obs: &Observation, keep: &[u32]) -> Option<Heal> {
         let missing = obs.me.max_hp.saturating_sub(obs.me.hp) as f32;
         if missing <= 0.0 {
             return None;
         }
         let rate = item_heal_rate(obs);
-        let mut options: Vec<Heal> = heal_skills(obs);
-        options.extend(
+        let items = |kept: bool| -> Vec<Heal> {
             obs.inventory
                 .iter()
-                .filter(|i| i.amount > 0)
+                .filter(|i| i.amount > 0 && keep.contains(&i.item_id) == kept)
                 .filter_map(|i| {
                     self.heal_of(i.item_id).map(|hp| Heal {
                         hp: hp * rate,
                         action: Action::UseItem { index: i.index },
                         skill: false,
                     })
-                }),
-        );
+                })
+                .collect()
+        };
+        let mut options: Vec<Heal> = heal_skills(obs);
+        options.extend(items(false));
+        if options.is_empty() {
+            options = items(true);
+        }
         pick_heal(options, missing)
     }
 

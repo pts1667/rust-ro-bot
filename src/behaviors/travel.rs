@@ -345,6 +345,8 @@ impl Bot {
             }
         }
         let mut strays = 0;
+        // The warps this trip stepped off by mistake and left out since: taken again when they were the only way
+        let mut strayed: HashSet<String> = HashSet::new();
         let fighter = self.knowledge.fighter(&self.observe().await?).await?;
         // NPCs talked to on the map the goal explores, and the map of the last leg: a town entered gets a roll.
         let mut explore_talks = 0;
@@ -440,6 +442,14 @@ impl Bot {
                     .await?;
             }
             let Some(mut route) = route else {
+                // The door into prt_church is the only way in: a walk to it that went into prt_in by mistake left
+                // the bot with no route at all, and the Acolyte gave up its last step
+                if !strayed.is_empty() {
+                    for key in strayed.drain() {
+                        skip.remove(&key);
+                    }
+                    continue;
+                }
                 if !went && self.go_near(target, &here).await? {
                     went = true;
                     continue;
@@ -474,6 +484,7 @@ impl Bot {
                     strays += 1;
                     // The rest of this trip goes another way, or gives up
                     skip.insert(edge.key());
+                    strayed.insert(edge.key());
                     self.stray_edges.push((edge.key(), Instant::now()));
                     if strays >= MAX_STRAYS {
                         return Ok(Outcome::failed(format!(
@@ -851,7 +862,7 @@ impl Bot {
             hit = true;
             // Healing does not stop the walk.
             if obs.me.hp_frac() < HP_LOW
-                && let Some(heal) = self.knowledge.heal_action(&obs)
+                && let Some(heal) = self.knowledge.heal_action(&obs, &self.keep)
             {
                 self.act(heal.action).await.ok();
             }

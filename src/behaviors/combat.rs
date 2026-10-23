@@ -264,7 +264,7 @@ impl Bot {
                 stalled_since = Instant::now();
             }
             if obs.me.hp_frac() < HP_POTION
-                && let Some(heal) = self.knowledge.heal_action(&obs)
+                && let Some(heal) = self.knowledge.heal_action(&obs, &self.keep)
             {
                 self.act(heal.action).await.ok();
                 self.act(Action::Attack {
@@ -401,7 +401,7 @@ impl Bot {
                     let (id, name) = (m.id, m.name.clone());
                     self.act(Action::Stand).await.ok();
                     if obs.me.hp_frac() < HP_POTION
-                        && let Some(heal) = self.knowledge.heal_action(&obs)
+                        && let Some(heal) = self.knowledge.heal_action(&obs, &self.keep)
                     {
                         self.act(heal.action).await.ok();
                     }
@@ -412,7 +412,7 @@ impl Bot {
             last_hp = obs.me.hp;
             // Natural regeneration is slow: heal with skills (SP comes back by itself), and with items when HP is low.
             // Neither works sitting down.
-            if let Some(heal) = self.knowledge.heal_action(&obs)
+            if let Some(heal) = self.knowledge.heal_action(&obs, &self.keep)
                 && (heal.skill || obs.me.hp_frac() < HP_LOW)
             {
                 self.act(Action::Stand).await.ok();
