@@ -122,9 +122,7 @@ pub fn score_map(
         // However few, an aggressive monster that kills in two hits makes the map no place to hunt (Drosera lv 46 on
         // ra_fild08, among Drops and Stapo, killed a lv 28 Swordsman with 548 HP); nor one the bot cannot outlast:
         // the lone Vocal of prt_fild07 (lv 18, 3016 HP, and Rockers it calls) killed 77 novices in an hour.
-        if mob.aggressive()
-            && !mob.boss()
-            && (fighter.lethal_in_two(mob) || a.danger >= LOST_FIGHT)
+        if mob.aggressive() && !mob.boss() && (fighter.lethal_in_two(mob) || a.danger >= LOST_FIGHT)
         {
             return None;
         }

@@ -91,6 +91,61 @@ fn a_reply_makes_the_visit_sure_and_comes_once() {
 }
 
 #[test]
+fn quiet_threads_come_back_and_busy_ones_are_left_out() {
+    let t = |id, title: &str, comments| ForumThread {
+        id,
+        title: title.into(),
+        comments,
+        ..Default::default()
+    };
+    // As the forum lists them: the latest activity first
+    let threads = vec![
+        t(2, "Payon leveling spots", 47),
+        t(51, "Leveling in pay_fild08", 0),
+        t(44, "How do I become a merchant?", 3),
+        t(9, "Leveling Spot in prt_fild10", 0),
+        t(26, "Leveling in prt_fild01", 1),
+    ];
+    let mut m = ForumMemory::default();
+    let near = BTreeSet::from(["payon".to_owned(), "pay_fild08".to_owned()]);
+    let at = 1_000_000;
+    let ids = |m: &ForumMemory, now: u64| -> Vec<(u64, Fresh)> {
+        m.listed(&threads, &near, now)
+            .into_iter()
+            .map(|(t, f)| (t.id, f))
+            .collect()
+    };
+    assert_eq!(
+        ids(&m, at),
+        vec![
+            (51, Fresh::New),
+            (9, Fresh::New),
+            (26, Fresh::New),
+            (44, Fresh::New)
+        ],
+        "the fewest comments first, the crowded thread left out"
+    );
+    for (id, comments) in [(51, 0), (44, 2), (9, 0), (26, 1)] {
+        m.read.insert(id, comments);
+        m.read_at.insert(id, at);
+    }
+    assert_eq!(ids(&m, at + 60), vec![(44, Fresh::NewComments)]);
+    assert_eq!(
+        ids(&m, at + REREAD_NEAR_GAP.as_secs()),
+        vec![(51, Fresh::Again), (44, Fresh::NewComments)],
+        "a thread on a map near the bot comes back first"
+    );
+    assert_eq!(
+        ids(&m, at + REREAD_GAP.as_secs())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![51, 9, 26, 44],
+        "the others come back after a day"
+    );
+}
+
+#[test]
 fn what_the_bot_writes_names_only_what_it_saw() {
     let seen = "Ann wrote \"Spores\": Watch out, Spores on prt_fild05 hit hard.";
     assert!(check_names("Spores on prt_fild05 hit hard for low levels.", seen).is_ok());
@@ -582,7 +637,11 @@ async fn live_visit(replied: bool) {
     f.memory.note_journal(&snap);
     println!(
         "--- opening ---\n{}",
-        f.opening(&snap, &f.api.threads(LISTED).await.unwrap())
+        f.opening(
+            &snap,
+            &f.api.threads(LISTED).await.unwrap(),
+            &BTreeSet::from(["prontera".to_owned()])
+        )
     );
     f.visit(&snap).await.unwrap();
     println!("--- writes ---\n{:#?}", mock.writes.lock().unwrap());

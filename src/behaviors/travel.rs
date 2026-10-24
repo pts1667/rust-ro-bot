@@ -13,9 +13,10 @@ use crate::api::observation::Warp;
 use crate::api::{Action, Observation, dist};
 use crate::bot::{Bot, Outcome};
 use crate::goap::state::HP_LOW;
-use crate::knowledge::graph::{Edge, Trip};
+use crate::knowledge::graph::{Edge, FARE_SAVES, Trip};
 use crate::knowledge::grounds::lethal_monster;
 use crate::knowledge::talks::shown_name;
+use crate::party::{CATCH_UP_KEPT, CATCH_UP_SAVES};
 
 /// Most warps one trip takes before giving up.
 const MAX_LEGS: usize = 30;
@@ -386,6 +387,13 @@ impl Bot {
                 }
             }
             let avoid: HashSet<String> = self.memory.strategy.avoid_maps.iter().cloned().collect();
+            // Catching up with a party too far on foot is worth a Kafra sooner, with zeny kept for potions
+            let catch_up = self.following && self.party.as_ref().is_some_and(|p| p.catch_up);
+            let (fare_budget, fare_saves) = if catch_up {
+                (obs.me.zeny.saturating_sub(CATCH_UP_KEPT), CATCH_UP_SAVES)
+            } else {
+                (obs.me.zeny, FARE_SAVES)
+            };
             // A guard's way across the map is no way for this trip
             let mut leg_skip = skip.clone();
             for e in self.knowledge.graph.edges(&here).await? {
@@ -405,7 +413,8 @@ impl Bot {
                         Trip::new(&here, target, &around)
                             .starting_in(obs.me.region)
                             .skipping(&leg_skip),
-                        obs.me.zeny,
+                        fare_budget,
+                        fare_saves,
                     )
                     .await?
                 else {
@@ -437,7 +446,8 @@ impl Bot {
                         Trip::new(&here, target, &avoid)
                             .starting_in(obs.me.region)
                             .skipping(&leg_skip),
-                        obs.me.zeny,
+                        fare_budget,
+                        fare_saves,
                     )
                     .await?;
             }

@@ -71,14 +71,14 @@ impl Forum {
             .await?;
         }
         // Then the threads that look worth it
+        let near = self.near_maps(&snap.obs.map.name).await;
         while v.read.len() < READS_PER_VISIT {
-            let unread: Vec<&ForumThread> = v
-                .threads
-                .iter()
-                .filter(|t| {
-                    self.memory.read.get(&t.id).is_none_or(|n| t.comments > *n)
-                        && !v.read.contains_key(&t.id)
-                })
+            let unread: Vec<&ForumThread> = self
+                .memory
+                .listed(&v.threads, &near, now())
+                .into_iter()
+                .map(|(t, _)| t)
+                .filter(|t| !v.read.contains_key(&t.id))
                 .take(SHOWN)
                 .collect();
             if unread.is_empty() {

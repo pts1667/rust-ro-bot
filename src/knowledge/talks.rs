@@ -263,7 +263,10 @@ mod tests {
     #[test]
     fn the_sailors_ferry_to_byalan_island_and_back() {
         let there = npc_way("Sailor#izlude", "izlu2dun").unwrap();
-        assert_eq!((there.fare, there.keywords.as_slice()), (150, &["byalan island".to_owned()][..]));
+        assert_eq!(
+            (there.fare, there.keywords.as_slice()),
+            (150, &["byalan island".to_owned()][..])
+        );
         assert!(npc_way("Sailor#2izlude", "izlude").is_some_and(|t| t.fare == 0));
         // The dock's Sailor also sails to Alberta, a way the bot does not take
         assert!(npc_way("Sailor#izlude", "alberta").is_none());

@@ -507,10 +507,10 @@ async fn zeny_saved(snap: &Snapshot, knowledge: &Knowledge, state: &StrategicSta
     let obs = &snap.obs;
     let mut saved = 0;
     for q in quests::all() {
-        if !q.open_to(obs) || !awake(snap.quests.get(q.id)) || !wanted(q, obs, state) {
+        if !q.open_to(obs) || !awake(q, snap.quests.get(q.id)) || !wanted(q, obs, state) {
             continue;
         }
-        let p = snap.quests.get(q.id).cloned().unwrap_or_default();
+        let p = undone(snap.quests.get(q.id));
         let Some(stage) = q.stages.get(q.actionable_stage(&p, obs)) else {
             continue;
         };
@@ -526,6 +526,11 @@ async fn zeny_saved(snap: &Snapshot, knowledge: &Knowledge, state: &StrategicSta
     Ok(saved)
 }
 
+/// The progress a quest open to the bot starts from: none when it is remembered done (see `awake`).
+fn undone(progress: Option<&QuestProgress>) -> QuestProgress {
+    progress.filter(|p| !p.done).cloned().unwrap_or_default()
+}
+
 async fn quest_options(
     snap: &Snapshot,
     knowledge: &Knowledge,
@@ -536,7 +541,7 @@ async fn quest_options(
     let mut out = Vec::new();
     for q in quests::all() {
         let progress = snap.quests.get(q.id);
-        if !q.open_to(obs) || !awake(progress) {
+        if !q.open_to(obs) || !awake(q, progress) {
             continue;
         }
         if !wanted(q, obs, state) {
@@ -545,7 +550,7 @@ async fn quest_options(
         if q.reward == Reward::Rebirth && !heart_reachable(knowledge, obs, state).await? {
             continue;
         }
-        let p = progress.cloned().unwrap_or_default();
+        let p = undone(progress);
         let i = q.actionable_stage(&p, obs);
         let Some(stage) = q.stages.get(i) else {
             continue;

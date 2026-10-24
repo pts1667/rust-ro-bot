@@ -68,7 +68,9 @@ impl PerBot {
     }
 
     fn all(&mut self) -> impl Iterator<Item = &mut Boxed> {
-        self.files.values_mut().chain(std::iter::once(&mut self.rest))
+        self.files
+            .values_mut()
+            .chain(std::iter::once(&mut self.rest))
     }
 }
 

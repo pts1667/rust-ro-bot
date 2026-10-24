@@ -13,8 +13,8 @@ use crate::api::{Action, BuyLine, Observation, SellLine, dist};
 use crate::bot::{Bot, Outcome};
 use crate::memory::ShopSpot;
 use crate::quests::{
-    self, Act, Check, Dance, Fight, Quest, QuestProgress, Talk, Trap, Unburden, assigned_set,
-    normalize, stage_map, trapped,
+    self, Act, Check, Dance, Fight, Quest, QuestProgress, Reward, Talk, Trap, Unburden,
+    assigned_set, normalize, stage_map, trapped,
 };
 
 /// Tries of one stage before the quest is left alone for a while.
@@ -205,6 +205,13 @@ impl Bot {
             self.memory.quests.insert(id.to_owned(), progress);
             return Ok(Outcome::Done);
         }
+        if progress.done {
+            self.memory.note(format!(
+                "{}: remembered done, but the reward is not had: starting over",
+                quest.title
+            ));
+            progress = QuestProgress::default();
+        }
         let i = quest.actionable_stage(&progress, &obs);
         let Some(stage) = quest.stages.get(i) else {
             // Every stage went through and the reward did not come: start over, the NPCs will say where it stands.
@@ -233,9 +240,7 @@ impl Bot {
             return Ok(Outcome::failed("nothing remembered to tell"));
         }
         progress.stage = i;
-        if progress.branch.is_none() {
-            progress.branch = quest.branch(&progress, &obs).map(str::to_owned);
-        }
+        progress.branch = quest.branch(&progress, &obs).map(str::to_owned);
         if let Some(item) = stage.wear {
             self.wear(&obs, item).await;
         }
@@ -1103,8 +1108,12 @@ pub fn stage_place(quest: &Quest, i: usize) -> Option<(&'static str, (u16, u16))
 }
 
 /// Whether the quest may be taken up now (not paused after getting stuck).
-pub fn awake(progress: Option<&QuestProgress>) -> bool {
-    progress.is_none_or(|p| p.paused_until <= now_secs() && !p.done)
+/// A job quest remembered done counts only once the job is had: the callers ask `Quest::open_to` first, so one remembered
+/// done here is of a character made anew (the server's characters were wiped), and is taken up again.
+pub fn awake(quest: &Quest, progress: Option<&QuestProgress>) -> bool {
+    progress.is_none_or(|p| {
+        p.paused_until <= now_secs() && (!p.done || matches!(quest.reward, Reward::Job(_)))
+    })
 }
 
 #[cfg(test)]

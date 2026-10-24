@@ -307,16 +307,21 @@ impl WorldGraph {
         self.search(trip, 0).await
     }
 
-    /// `route_for` for a bot with `zeny`: a Kafra teleport where nothing else leads there, or where it saves
-    /// `FARE_SAVES` warps or more.
-    pub async fn route_paying(&self, trip: Trip<'_>, zeny: u64) -> Result<Option<Vec<Edge>>> {
+    /// `route_for` for a bot that pays up to `zeny` a fare: a Kafra teleport where nothing else leads there, or where it
+    /// saves `saves` warps or more (`FARE_SAVES` for a bot on its own).
+    pub async fn route_paying(
+        &self,
+        trip: Trip<'_>,
+        zeny: u64,
+        saves: usize,
+    ) -> Result<Option<Vec<Edge>>> {
         let free = self.search(trip, 0).await?;
         if zeny == 0 {
             return Ok(free);
         }
         let paid = self.search(trip, zeny).await?;
         Ok(match (free, paid) {
-            (Some(free), Some(paid)) if free.len() >= paid.len() + FARE_SAVES => Some(paid),
+            (Some(free), Some(paid)) if free.len() >= paid.len() + saves => Some(paid),
             (None, paid) => paid,
             (free, _) => free,
         })
@@ -610,7 +615,7 @@ mod tests {
             let g = g.clone();
             let none = none.clone();
             async move {
-                g.route_paying(Trip::new("morocc", "prontera", &none), zeny)
+                g.route_paying(Trip::new("morocc", "prontera", &none), zeny, FARE_SAVES)
                     .await
                     .unwrap()
             }
@@ -626,11 +631,28 @@ mod tests {
         maps[1].1.push(warp(21, 1, "field", 1));
         let g = cache(&maps, "kafra2");
         let walk = g
-            .route_paying(Trip::new("desert", "prontera", &none), 5000)
+            .route_paying(Trip::new("desert", "prontera", &none), 5000, FARE_SAVES)
             .await
             .unwrap()
             .unwrap();
         assert!(walk.iter().all(|e| e.talk.is_none()), "{walk:?}");
+        // Three warps on foot against the teleport: a bot on its own walks, one catching up with its party pays
+        let dir2 = std::env::temp_dir().join(format!("rro-graph-kafra2-{}", std::process::id()));
+        std::fs::write(dir2.join("db_maps_morocc.json"), data.to_string()).unwrap();
+        let g = WorldGraph::new(Db::new("http://127.0.0.1:9", Some(dir2)).unwrap());
+        let from_morocc = |saves| {
+            let g = g.clone();
+            let none = none.clone();
+            async move {
+                g.route_paying(Trip::new("morocc", "prontera", &none), 5000, saves)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        assert_eq!(from_morocc(FARE_SAVES).await.len(), 3);
+        let paid = from_morocc(2).await;
+        assert!(paid.len() == 1 && paid[0].talk.is_some(), "{paid:?}");
     }
 
     #[tokio::test]

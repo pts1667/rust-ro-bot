@@ -35,10 +35,16 @@ use crate::voice::Voice;
 /// Replies waiting for it make a visit sure.
 const VISIT_CHANCE: f64 = 0.25;
 const VISIT_GAP: Duration = Duration::from_secs(10 * 60);
-/// Threads fetched on arrival (a new thread must not repeat one of their titles), and the most shown: the latest
-/// active ones, without those the bot read that have no new comments since.
+/// Threads fetched on arrival (a new thread must not repeat one of their titles), and the most shown: the fewest
+/// comments first, without those the bot read lately that have no new comments since.
 const LISTED: u32 = 30;
 const SHOWN: usize = 12;
+/// A thread read with nothing new since is shown again after a while, sooner when it names a map near the bot.
+const REREAD_GAP: Duration = Duration::from_secs(24 * 60 * 60);
+const REREAD_NEAR_GAP: Duration = Duration::from_secs(60 * 60);
+/// A thread with more comments is not shown: the bot reads it only to answer a reply to it. Otherwise every comment
+/// brings the busiest thread back to every bot, and the others are never answered.
+const CROWDED: u32 = 20;
 /// Model turns per visit, and what a visit may do at most.
 const ROUNDS: usize = 8;
 const READS_PER_VISIT: usize = 4;
@@ -77,6 +83,8 @@ pub struct Finding {
 struct ForumMemory {
     /// Comments of each thread when the bot last read it.
     read: BTreeMap<u64, u32>,
+    /// Unix seconds the bot last read each thread.
+    read_at: BTreeMap<u64, u64>,
     /// Comments the bot wrote per thread.
     replies: BTreeMap<u64, u32>,
     /// Threads the bot started.
@@ -163,6 +171,58 @@ impl ForumMemory {
     fn wants_visit(&self, roll: f64) -> bool {
         !self.inbox.is_empty()
             || (now().saturating_sub(self.last_visit) >= VISIT_GAP.as_secs() && roll < VISIT_CHANCE)
+    }
+
+    /// The threads worth showing, the fewest comments first: those not read yet, those with new comments, and those
+    /// read a while ago, sooner when they name a map in `near`. Crowded threads are left out.
+    fn listed<'a>(
+        &self,
+        threads: &'a [ForumThread],
+        near: &BTreeSet<String>,
+        now: u64,
+    ) -> Vec<(&'a ForumThread, Fresh)> {
+        let mut listed: Vec<(&ForumThread, Fresh)> = threads
+            .iter()
+            .filter(|t| t.comments <= CROWDED)
+            .filter_map(|t| {
+                let Some(&comments) = self.read.get(&t.id) else {
+                    return Some((t, Fresh::New));
+                };
+                if t.comments > comments {
+                    return Some((t, Fresh::NewComments));
+                }
+                let text = format!("{} {}", t.title, t.body).to_lowercase();
+                let gap = if near.iter().any(|m| text.contains(m.as_str())) {
+                    REREAD_NEAR_GAP
+                } else {
+                    REREAD_GAP
+                };
+                let read_at = self.read_at.get(&t.id).copied().unwrap_or(0);
+                (now.saturating_sub(read_at) >= gap.as_secs()).then_some((t, Fresh::Again))
+            })
+            .collect();
+        // The sort is stable: among equals, the latest activity first as the forum lists them
+        listed.sort_by_key(|(t, _)| t.comments);
+        listed
+    }
+}
+
+/// Why a thread is shown to the bot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fresh {
+    New,
+    NewComments,
+    /// Read before, with nothing new since.
+    Again,
+}
+
+impl Fresh {
+    fn mark(self) -> &'static str {
+        match self {
+            Fresh::New => "new",
+            Fresh::NewComments => "new comments",
+            Fresh::Again => "read before",
+        }
     }
 }
 
@@ -389,6 +449,15 @@ impl Forum {
         false
     }
 
+    /// The map the bot is on and the maps its warps lead to: a thread that names one is worth reading again sooner.
+    async fn near_maps(&self, map: &str) -> BTreeSet<String> {
+        let mut near = BTreeSet::from([map.to_lowercase()]);
+        if let Ok(data) = self.knowledge.db.map(map).await {
+            near.extend(data.warps.iter().map(|w| w.to.map.id_str().to_lowercase()));
+        }
+        near
+    }
+
     /// One sitting, with the voice of the bot.
     async fn visit(&mut self, snap: &Snapshot) -> Result<()> {
         match self.voice.clone() {
@@ -403,7 +472,8 @@ impl Forum {
             threads: self.api.threads(LISTED).await?,
             ..Default::default()
         };
-        let opening = self.opening(snap, &v.threads);
+        let near = self.near_maps(&snap.obs.map.name).await;
+        let opening = self.opening(snap, &v.threads, &near);
         v.seen.push_str(&opening);
         v.own = format!(
             "{}
@@ -535,6 +605,7 @@ impl Forum {
         }
         let view = self.api.thread(id).await.map_err(|e| format!("{e:#}"))?;
         self.memory.read.insert(id, view.comment_list.len() as u32);
+        self.memory.read_at.insert(id, now());
         let text = thread_text(&view);
         v.seen.push_str(&text);
         // What the bot wrote before is what it did
@@ -670,6 +741,7 @@ impl Forum {
             Ok(thread) => {
                 self.memory.mine.insert(thread.id);
                 self.memory.read.insert(thread.id, 0);
+                self.memory.read_at.insert(thread.id, now());
                 self.memory.last_thread = now();
                 self.memory.shared_in(&format!("{title} {body}"));
                 v.writes += 1;
@@ -682,7 +754,7 @@ impl Forum {
     }
 
     /// What the bot sees when it sits down: the replies to it, the threads, its notes and what it knows.
-    fn opening(&self, snap: &Snapshot, threads: &[ForumThread]) -> String {
+    fn opening(&self, snap: &Snapshot, threads: &[ForumThread], near: &BTreeSet<String>) -> String {
         let me = &snap.obs.me;
         let name = self.api.name();
         let mut o = format!(
@@ -709,11 +781,12 @@ impl Forum {
             );
         }
         o.push_str(
-            "\nTHREADS, latest activity first (those you read with nothing new left out):\n",
+            "\nTHREADS, fewest comments first (the busiest and those you read lately with nothing new left out):\n",
         );
-        let fresh: Vec<&ForumThread> = threads
-            .iter()
-            .filter(|t| self.memory.read.get(&t.id).is_none_or(|n| t.comments > *n))
+        let fresh: Vec<(&ForumThread, Fresh)> = self
+            .memory
+            .listed(threads, near, now())
+            .into_iter()
             .take(SHOWN)
             .collect();
         if threads.is_empty() {
@@ -721,24 +794,20 @@ impl Forum {
         } else if fresh.is_empty() {
             o.push_str("- nothing new since you last read them\n");
         }
-        for t in fresh {
+        for (t, fresh) in fresh {
             let yours = if t.author.eq_ignore_ascii_case(name) {
                 ", yours"
             } else {
                 ""
             };
-            let mark = if self.memory.read.contains_key(&t.id) {
-                "new comments"
-            } else {
-                "new"
-            };
             let _ = writeln!(
                 o,
-                "- thread {}: \"{}\" by {}, {} comments ({mark}{yours})",
+                "- thread {}: \"{}\" by {}, {} comments ({}{yours})",
                 t.id,
                 forum_text(&t.title, 150, true),
                 t.author,
-                t.comments
+                t.comments,
+                fresh.mark()
             );
         }
         o.push_str("\nYOUR NOTES:\n");

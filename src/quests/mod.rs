@@ -388,6 +388,14 @@ impl Quest {
             {
                 i = l;
             }
+        } else if !self.stages.iter().any(logged)
+            && self.stages.get(i).is_some_and(|s| !s.log.is_empty())
+        {
+            // The window shows nothing of the quest at a stage it shows: the memory is of a sign-up the server does not
+            // have (lost, or made on another server). Back to the stage that signs up.
+            while i > 0 && !self.stages[i].log.is_empty() {
+                i -= 1;
+            }
         }
         // In the place of a test, the test is the stage (the remembered one when several happen there, else the
         // next); on a test map without places, the next test on it.
@@ -429,19 +437,26 @@ impl Quest {
         i
     }
 
-    /// The way of the quest the bot was sent: remembered, or shown by the quest window.
+    /// The way of the quest the bot was sent: remembered, or shown by the quest window. The window wins when it
+    /// shows another way and nothing of the remembered one (the quest taken again, and sent elsewhere).
     pub fn branch<'a>(&'a self, progress: &'a QuestProgress, obs: &Observation) -> Option<&'a str> {
-        progress.branch.as_deref().or_else(|| {
-            self.stages
-                .iter()
-                .find(|s| {
-                    s.branch.is_some()
-                        && s.log
-                            .iter()
-                            .any(|id| obs.quests.iter().any(|q| q.id == *id))
-                })
-                .and_then(|s| s.branch)
-        })
+        let shown = |branch: &str| {
+            self.stages.iter().any(|s| {
+                s.branch == Some(branch)
+                    && s.log
+                        .iter()
+                        .any(|id| obs.quests.iter().any(|q| q.id == *id))
+            })
+        };
+        let window = self
+            .stages
+            .iter()
+            .filter_map(|s| s.branch)
+            .find(|b| shown(b));
+        match progress.branch.as_deref() {
+            Some(remembered) if window.is_none() || shown(remembered) => Some(remembered),
+            _ => window,
+        }
     }
 
     /// The stage to act on: the current one, or the one leading into its test room when the bot is not in it. A
@@ -496,8 +511,19 @@ impl Quest {
 /// The stage each quest taken up and not finished is at.
 pub fn stages(book: &QuestBook, obs: &Observation) -> BTreeMap<String, usize> {
     book.iter()
-        .filter(|(_, p)| !p.done)
-        .filter_map(|(id, p)| find(id).map(|q| (id.clone(), q.actionable_stage(p, obs))))
+        .filter_map(|(id, p)| {
+            let q = find(id)?;
+            if !p.done {
+                return Some((id.clone(), q.actionable_stage(p, obs)));
+            }
+            // A job quest remembered done, open to a character made anew: from the start, as the strategist offers it.
+            (matches!(q.reward, Reward::Job(_)) && q.open_to(obs)).then(|| {
+                (
+                    id.clone(),
+                    q.actionable_stage(&QuestProgress::default(), obs),
+                )
+            })
+        })
         .collect()
 }
 
@@ -630,7 +656,12 @@ pub mod build {
 
     /// Items worth `wanted` points together, see `Need::Points`.
     pub fn gather_points(what: &'static str, items: Items, wanted: u32) -> Stage {
-        stage(what, Act::Gather(Need::Points(items, wanted)), Vec::new(), false)
+        stage(
+            what,
+            Act::Gather(Need::Points(items, wanted)),
+            Vec::new(),
+            false,
+        )
     }
 
     pub fn gather_assigned(what: &'static str) -> Stage {
@@ -1030,6 +1061,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_sign_up_the_server_does_not_have_is_made_again() {
+        use crate::api::observation::QuestEntry;
+        let stage_of = |id: &str, what: &str| {
+            find(id)
+                .unwrap()
+                .stages
+                .iter()
+                .position(|s| s.what.starts_with(what))
+                .unwrap()
+        };
+        let remembered = |stage, branch: Option<&str>| QuestProgress {
+            stage,
+            branch: branch.map(str::to_owned),
+            ..Default::default()
+        };
+        let mut obs = Observation::default();
+        obs.me.job = "Novice".into();
+        // Remembered past the sign-up, with an empty window: signing up again.
+        for (id, past, sign_up, branch) in [
+            (
+                "job:Acolyte",
+                "visit Father Rubalkabara",
+                "ask the Cleric",
+                Some("rubalkabara"),
+            ),
+            (
+                "job:Mage",
+                "gather 2 Jellopy, 3 Fluff",
+                "ask the Mage Guildsman",
+                None,
+            ),
+            (
+                "job:Merchant",
+                "hand the receipt",
+                "apply to Chief Mahnsoo",
+                Some("geffen"),
+            ),
+            ("job:Thief", "pick mushrooms", "ask the Thief Guide", None),
+            (
+                "job:Archer",
+                "gather Trunks",
+                "apply at the Archer Guild",
+                None,
+            ),
+        ] {
+            let q = find(id).unwrap();
+            assert_eq!(
+                q.current_stage(&remembered(stage_of(id, past), branch), &obs),
+                stage_of(id, sign_up),
+                "{id}"
+            );
+        }
+        // Signed up again and sent to another ascetic: the window's way, not the remembered one.
+        let q = find("job:Acolyte").unwrap();
+        obs.quests.push(QuestEntry {
+            id: 1002,
+            ..Default::default()
+        });
+        let stale = remembered(
+            stage_of("job:Acolyte", "visit Father Rubalkabara"),
+            Some("rubalkabara"),
+        );
+        assert_eq!(q.branch(&stale, &obs), Some("mathilda"));
+        assert_eq!(
+            q.current_stage(&stale, &obs),
+            stage_of("job:Acolyte", "visit Mother Mathilda")
+        );
+        // A job quest remembered done by a Novice (the character made anew): from the sign-up again.
+        obs.quests.clear();
+        (obs.me.base_level, obs.me.job_level) = (30, 10);
+        obs.skills.push(Skill {
+            name: "NV_BASIC".into(),
+            level: 9,
+            ..Default::default()
+        });
+        let book = QuestBook::from([(
+            "job:Swordman".to_owned(),
+            QuestProgress {
+                stage: 11,
+                done: true,
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(stages(&book, &obs).get("job:Swordman"), Some(&0));
+        obs.me.job = "Swordman".into();
+        assert_eq!(stages(&book, &obs).get("job:Swordman"), None);
+        // A way the window shows too stays: the Sage's professors share their last entry.
+        let sage = find("job:Sage").unwrap();
+        obs.quests = vec![QuestEntry {
+            id: 2051,
+            ..Default::default()
+        }];
+        assert_eq!(
+            sage.branch(&remembered(0, Some("biology")), &obs),
+            Some("biology")
+        );
+    }
+
     fn novice_with(quest: u32, map: &str, (x, y): (u16, u16)) -> Observation {
         use crate::api::observation::QuestEntry;
         let mut obs = Observation::default();
@@ -1187,6 +1317,10 @@ mod tests {
         assert!(missing(&need, &fresh, &obs).is_empty());
         // Every grade is kept from the shops.
         let archer = find("job:Archer").unwrap();
-        assert!([1066, 1067, 1068, 1019].iter().all(|i| archer.items().contains(i)));
+        assert!(
+            [1066, 1067, 1068, 1019]
+                .iter()
+                .all(|i| archer.items().contains(i))
+        );
     }
 }

@@ -37,6 +37,10 @@ const FOLLOW_REAIM: u32 = 2;
 const FOLLOW_STEP_MS: u64 = 400;
 /// Most warps a member goes to follow; further, it plays by itself until the one it follows is near again.
 const FOLLOW_HOPS: u32 = 6;
+/// A member further than `FOLLOW_HOPS` on foot from the one it follows pays a Kafra to a town nearer to it when the
+/// teleport saves this many warps, and keeps this much zeny after the fare, for potions.
+pub(crate) const CATCH_UP_SAVES: usize = 2;
+pub(crate) const CATCH_UP_KEPT: u64 = 1000;
 /// How long the answer to "can I follow to that map" holds.
 const FOLLOW_CHECK_EVERY: Duration = Duration::from_secs(120);
 /// How long the bot follows a member who said "follow me" before it goes back to the leader.
@@ -162,6 +166,8 @@ pub struct PartyPlay {
     pub recruiting: recruit::Recruiting,
     /// The map last checked for following there, when, and whether the bot can.
     follow_check: Option<(String, Instant, bool)>,
+    /// That map is too far on foot but a Kafra the bot can pay brings it near: travel there may pay one.
+    pub catch_up: bool,
     /// The leader called a break in this town, for so many minutes; taken by the agent.
     pub break_call: Option<(String, u32)>,
     /// The leader ended its break.
@@ -194,6 +200,7 @@ impl PartyPlay {
             trade_since: None,
             recruiting: recruit::Recruiting::new(last_seq),
             follow_check: None,
+            catch_up: false,
             break_call: None,
             break_over: false,
         }
@@ -720,7 +727,14 @@ impl Bot {
             .safe_hops(map, &mut lethal)
             .await?;
         let deadly_there = lethal_monster(&self.knowledge.db, map, &fighter).await;
-        let ok = hops.is_some_and(|h| h <= FOLLOW_HOPS) && deadly_there.is_none();
+        let walks = hops.is_some_and(|h| h <= FOLLOW_HOPS);
+        // Too far on foot: a Kafra to a town nearer to it, when the bot has the fare and zeny to spare
+        let pays = !walks
+            && deadly_there.is_none()
+            && self
+                .catch_up_route(obs, map, &avoid, &fighter, &mut lethal)
+                .await?;
+        let ok = (walks || pays) && deadly_there.is_none();
         if !ok {
             // No safe way (every way crosses a deadly map) and no way at all look the same in the hops: say which
             let reachable = self
@@ -734,9 +748,64 @@ impl Bot {
                 .is_some();
             tracing::info!(from = %obs.map.name, to = %map, ?hops, reachable, deadly = ?deadly_there, "too far or too dangerous to follow, playing alone meanwhile");
         }
-        self.party.as_mut().expect("party play").follow_check =
-            Some((map.to_owned(), Instant::now(), ok));
+        let play = self.party.as_mut().expect("party play");
+        play.follow_check = Some((map.to_owned(), Instant::now(), ok));
+        play.catch_up = pays;
         Ok(ok)
+    }
+
+    /// Whether a way with a Kafra teleport the bot can pay leads to `map` within `FOLLOW_HOPS` warps, crossing no map
+    /// deadly for it: the way `travel` takes while following. `lethal` caches the maps judged.
+    async fn catch_up_route(
+        &self,
+        obs: &Observation,
+        map: &str,
+        avoid: &std::collections::HashSet<String>,
+        fighter: &crate::knowledge::combat::Fighter,
+        lethal: &mut HashMap<String, bool>,
+    ) -> Result<bool> {
+        let budget = obs.me.zeny.saturating_sub(CATCH_UP_KEPT);
+        if budget == 0 {
+            return Ok(false);
+        }
+        let Some(route) = self
+            .knowledge
+            .graph
+            .route_paying(
+                Trip::new(&obs.map.name, map, avoid).starting_in(obs.me.region),
+                budget,
+                CATCH_UP_SAVES,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some(fare) = route
+            .iter()
+            .find_map(|e| e.talk.as_ref().map(|t| t.fare).filter(|f| *f > 0))
+        else {
+            return Ok(false);
+        };
+        if route.len() > FOLLOW_HOPS as usize {
+            return Ok(false);
+        }
+        for crossed in route.iter().map(|e| e.to.as_str()).filter(|m| *m != map) {
+            let deadly = match lethal.get(crossed) {
+                Some(d) => *d,
+                None => {
+                    let d = lethal_monster(&self.knowledge.db, crossed, fighter)
+                        .await
+                        .is_some();
+                    lethal.insert(crossed.to_owned(), d);
+                    d
+                }
+            };
+            if deadly {
+                return Ok(false);
+            }
+        }
+        tracing::info!(from = %obs.map.name, to = %map, fare, legs = route.len(), "far from the party: a Kafra takes the bot nearer");
+        Ok(true)
     }
 
     /// One step at the side of `followed`: to its map, near it, then the fight.
